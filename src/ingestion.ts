@@ -24,6 +24,11 @@ import type {
   OpenWikiRunOptions,
   OpenWikiRunResult,
 } from "./agent/types.js";
+import {
+  applyPersonalWorkflowEnvironmentDefaults,
+  PERSONAL_DEFAULT_LANGUAGE,
+  verifyPersonalLiteLlmGateway,
+} from "./personalization/profile.js";
 
 const INGESTION_WINDOW_HOURS = 24;
 
@@ -62,6 +67,8 @@ export async function runOpenWikiIngestion(
 ): Promise<OpenWikiIngestionResult> {
   void _cwd;
   await loadOpenWikiEnv();
+  applyPersonalWorkflowEnvironmentDefaults();
+  await verifyPersonalLiteLlmGateway();
   await ensureOpenWikiHome();
   const config = await readOpenWikiOnboardingConfig();
   const registry = createConnectorRegistry();
@@ -168,6 +175,7 @@ async function runSourceIngestion({
 
     const agentResult = await runOpenWikiAgent("update", cwd, {
       isFollowup: false,
+      language: PERSONAL_DEFAULT_LANGUAGE,
       modelId,
       onEvent: emit,
       outputMode: "local-wiki",

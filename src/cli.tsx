@@ -33,7 +33,7 @@ import {
   saveOpenWikiEnv,
   type CredentialDiagnostic,
 } from "./env.js";
-import { createOpenWikiThreadId, runOpenWikiAgent } from "./agent/index.js";
+import { createOpenWikiThreadId } from "./agent/index.js";
 import { formatChatGptAccountFromEnv } from "./agent/openai-chatgpt-oauth.js";
 import {
   getErrorMessage,
@@ -91,6 +91,11 @@ import {
   FIRST_RUN_NOTICE_OPT_OUT,
   FIRST_RUN_NOTICE_VERIFY,
 } from "./telemetry/index.js";
+import {
+  applyPersonalWorkflowCommandDefaults,
+  applyPersonalWorkflowEnvironmentDefaults,
+} from "./personalization/profile.js";
+import { runPersonalizedOpenWikiAgent } from "./personalization/run.js";
 
 type RunState =
   | { status: "idle" }
@@ -620,7 +625,7 @@ function App({ command }: AppProps) {
               )
             : activeUserMessage;
 
-        return runOpenWikiAgent(resolvedCommand, runtimeCwd, {
+        return runPersonalizedOpenWikiAgent(resolvedCommand, runtimeCwd, {
           debug: isDebugMode(),
           isFollowup: activeMessageIsFollowup,
           language: command.language,
@@ -3707,17 +3712,19 @@ function Rows({ rows }: RowsProps) {
 }
 
 const argv = process.argv.slice(2);
-const parsedCommand = parseCommand(argv);
+const rawParsedCommand = parseCommand(argv);
 
 if (
-  (parsedCommand.kind === "run" && !parsedCommand.dryRun) ||
-  parsedCommand.kind === "auth" ||
-  parsedCommand.kind === "cron" ||
-  parsedCommand.kind === "ingest" ||
-  parsedCommand.kind === "ngrok"
+  (rawParsedCommand.kind === "run" && !rawParsedCommand.dryRun) ||
+  rawParsedCommand.kind === "auth" ||
+  rawParsedCommand.kind === "cron" ||
+  rawParsedCommand.kind === "ingest" ||
+  rawParsedCommand.kind === "ngrok"
 ) {
   await loadOpenWikiEnv();
 }
+applyPersonalWorkflowEnvironmentDefaults();
+const parsedCommand = applyPersonalWorkflowCommandDefaults(rawParsedCommand);
 
 const command = await resolveStartupCommand(parsedCommand, {
   cwd: process.cwd(),
@@ -4155,7 +4162,7 @@ async function runPrintCommand(
           )
         : command.userMessage;
 
-    await runOpenWikiAgent(command.command, runtimeCwd, {
+    await runPersonalizedOpenWikiAgent(command.command, runtimeCwd, {
       debug: isDebugMode(),
       isFollowup: command.command === "chat",
       language: command.language,

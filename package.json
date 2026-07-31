@@ -1,7 +1,7 @@
 {
   "name": "openwiki",
   "version": "0.2.4",
-  "description": "A CLI that uses a DeepAgents documentation agent to generate and maintain an OpenWiki for a codebase.",
+  "description": "A personal Chinese knowledge workflow built as an upstream-compatible OpenWiki distribution.",
   "license": "MIT",
   "type": "module",
   "engines": {
@@ -12,12 +12,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/langchain-ai/openwiki.git"
+    "url": "git+https://github.com/hwj123hwj/hwj-wiki.git"
   },
   "bugs": {
-    "url": "https://github.com/langchain-ai/openwiki/issues"
+    "url": "https://github.com/hwj123hwj/hwj-wiki/issues"
   },
-  "homepage": "https://github.com/langchain-ai/openwiki#readme",
+  "homepage": "https://github.com/hwj123hwj/hwj-wiki#readme",
   "files": [
     "dist",
     "skills",

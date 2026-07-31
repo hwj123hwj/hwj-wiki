@@ -32,21 +32,19 @@ afterEach(async () => {
 });
 
 describe("ensureCodeModeRepoSetup agent files", () => {
-  test("creates both AGENTS.md and CLAUDE.md when neither exists", async () => {
+  test("creates AGENTS.md but not CLAUDE.md when neither exists", async () => {
     const repo = await createTempRepo();
 
     await ensureCodeModeRepoSetup(repo);
 
-    for (const fileName of ["AGENTS.md", "CLAUDE.md"]) {
-      const content = await readIfPresent(path.join(repo, fileName));
-      expect(content, `${fileName} should be created`).not.toBeNull();
-      expect(content).toContain(SNIPPET_START);
-      expect(content).toContain(SNIPPET_END);
-      expect(content).toContain("## OpenWiki");
-    }
+    const agents = await readIfPresent(path.join(repo, "AGENTS.md"));
+    expect(agents).toContain(SNIPPET_START);
+    expect(agents).toContain(SNIPPET_END);
+    expect(agents).toContain("## OpenWiki");
+    expect(await readIfPresent(path.join(repo, "CLAUDE.md"))).toBeNull();
   });
 
-  test("refreshes the OpenWiki block in place and preserves surrounding content", async () => {
+  test("removes a legacy CLAUDE.md block and preserves surrounding content", async () => {
     const repo = await createTempRepo();
     const existing = `# My Project
 
@@ -67,8 +65,8 @@ Trailing notes that must survive.
     expect(content).toContain("Hand-written guidance for coding agents.");
     expect(content).toContain("Trailing notes that must survive.");
     expect(content).not.toContain("stale OpenWiki content");
-    // Exactly one managed block after a refresh.
-    expect(content?.match(new RegExp(SNIPPET_START, "g"))).toHaveLength(1);
+    expect(content).not.toContain(SNIPPET_START);
+    expect(content).not.toContain(SNIPPET_END);
   });
 
   test("appends the block to an existing file without markers, keeping content", async () => {
@@ -91,9 +89,9 @@ Trailing notes that must survive.
     const repo = await createTempRepo();
 
     await ensureCodeModeRepoSetup(repo);
-    const first = await readIfPresent(path.join(repo, "CLAUDE.md"));
+    const first = await readIfPresent(path.join(repo, "AGENTS.md"));
     await ensureCodeModeRepoSetup(repo);
-    const second = await readIfPresent(path.join(repo, "CLAUDE.md"));
+    const second = await readIfPresent(path.join(repo, "AGENTS.md"));
 
     expect(second).toEqual(first);
   });
@@ -113,11 +111,11 @@ describe("ensureCodeModeRepoSetup workflow", () => {
     for (const managedPath of [
       "openwiki",
       "AGENTS.md",
-      "CLAUDE.md",
       ".github/workflows/openwiki-update.yml",
     ]) {
       expect(workflow).toContain(managedPath);
     }
+    expect(workflow).not.toContain("CLAUDE.md");
   });
 
   test("wires the LangSmith connector read key into the workflow env", async () => {

@@ -1,4 +1,31 @@
-# OpenWiki
+# HWJ Wiki
+
+HWJ Wiki 是基于 OpenWiki 的个人工作流发行版。它保留上游 Wiki 生成引擎，
+并增加本地 LiteLLM（`localhost:4001`）、默认中文、Pi/Codex/Antigravity
+历史、豆包导出、隐私脱敏和项目踩坑索引。
+
+常用命令保持不变：
+
+```bash
+openwiki code --update
+openwiki personal --update
+```
+
+从 GitHub 安装当前个人版本：
+
+```bash
+npm install --global github:hwj123hwj/hwj-wiki
+```
+
+没有显式 Provider 配置时会使用现有 OpenAI-compatible 客户端连接
+`http://localhost:4001/v1`，默认模型为 `coding`。显式 Provider、模型和
+`--language` 参数始终优先。个性化设计见
+[实现基线](./docs/openwiki_customization_plan.md)，上游同步见
+[同步说明](./docs/upstream-sync.md)。
+
+> 上游项目：[langchain-ai/openwiki](https://github.com/langchain-ai/openwiki)
+
+## OpenWiki upstream documentation
 
 OpenWiki is a CLI that writes and maintains agent wikis for codebases or purpose memory. It's built specifically for agents, can ingest local knowledge sources through built-in connectors or git repositories and synthesize them into a local wiki.
 

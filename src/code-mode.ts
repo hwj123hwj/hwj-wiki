@@ -11,9 +11,10 @@ const OPENWIKI_AGENTS_SNIPPET_START = "<!-- OPENWIKI:START -->";
 const OPENWIKI_AGENTS_SNIPPET_END = "<!-- OPENWIKI:END -->";
 const DEFAULT_CODE_MODE_CRON = "0 8 * * *";
 
-// Root agent-instruction files OpenWiki keeps pointed at the generated wiki.
-// Each is created when missing and refreshed in place when already present.
-const CODE_MODE_AGENT_FILES = ["AGENTS.md", "CLAUDE.md"];
+// Keep the upstream AGENTS.md integration, but do not create or maintain a
+// CLAUDE.md in the personalized distribution. A one-time marker-only cleanup
+// below removes legacy OpenWiki snippets without touching user-authored text.
+const CODE_MODE_AGENT_FILES = ["AGENTS.md"];
 
 /** Controls which parts of the repo OpenWiki sets up for code mode. */
 export interface CodeModeRepoSetupOptions {
@@ -44,6 +45,7 @@ export async function ensureCodeModeRepoSetup(
     );
   }
   await writeCodeModeAgentSnippets(cwd);
+  await removeLegacyClaudeOpenWikiSnippet(cwd);
 }
 
 /**
@@ -178,6 +180,33 @@ async function writeCodeModeAgentSnippets(cwd: string): Promise<void> {
   );
 }
 
+async function removeLegacyClaudeOpenWikiSnippet(cwd: string): Promise<void> {
+  const claudePath = path.join(cwd, "CLAUDE.md");
+  let currentContent: string;
+
+  try {
+    currentContent = await readFile(claudePath, "utf8");
+  } catch (error) {
+    if (isFileNotFoundError(error)) return;
+    throw error;
+  }
+
+  const startIndex = currentContent.indexOf(OPENWIKI_AGENTS_SNIPPET_START);
+  const endIndex = currentContent.indexOf(OPENWIKI_AGENTS_SNIPPET_END);
+  if (startIndex === -1 || endIndex === -1 || endIndex < startIndex) {
+    return;
+  }
+
+  const nextContent =
+    currentContent.slice(0, startIndex) +
+    currentContent.slice(endIndex + OPENWIKI_AGENTS_SNIPPET_END.length);
+  await writeFile(
+    claudePath,
+    nextContent.trim().length === 0 ? "" : nextContent,
+    "utf8",
+  );
+}
+
 async function writeCodeModeAgentSnippet(
   agentsPath: string,
   snippet: string,
@@ -251,7 +280,6 @@ jobs:
           add-paths: |
             openwiki
             AGENTS.md
-            CLAUDE.md
             .github/workflows/openwiki-update.yml
           branch: openwiki/update
           commit-message: "docs: update OpenWiki"
