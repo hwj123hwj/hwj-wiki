@@ -25,6 +25,7 @@ npm install --global github:hwj123hwj/hwj-wiki
 
 没有显式 Provider 配置时会使用现有 OpenAI-compatible 客户端连接
 `http://localhost:4001/v1`，默认模型为 `coding`。显式 Provider、模型和
+网关 Key 始终优先；否则使用仅面向本机网关的内置默认 Key。
 `--language` 参数始终优先。个性化设计见
 [实现基线](./docs/openwiki_customization_plan.md)，上游同步见
 [同步说明](./docs/upstream-sync.md)。

@@ -23,7 +23,7 @@ HWJ Wiki 是 OpenWiki 的个人工作流发行版。它保持上游 Wiki 生成�
 ```text
 Endpoint: http://localhost:4001/v1
 Model: coding
-Key: OPENAI_COMPATIBLE_API_KEY > LITELLM_MASTER_KEY > local placeholder
+Key: OPENAI_COMPATIBLE_API_KEY > LITELLM_MASTER_KEY > built-in localhost-only key
 ```
 
 显式的 `OPENWIKI_PROVIDER`、`OPENWIKI_MODEL_ID` 和兼容网关配置始终优先。

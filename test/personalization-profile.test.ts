@@ -3,6 +3,7 @@ import type { CliCommand } from "../src/commands.ts";
 import {
   applyPersonalWorkflowCommandDefaults,
   applyPersonalWorkflowEnvironmentDefaults,
+  PERSONAL_LITELLM_API_KEY,
   PERSONAL_LITELLM_BASE_URL,
   verifyPersonalLiteLlmGateway,
 } from "../src/personalization/profile.ts";
@@ -26,6 +27,27 @@ describe("personal workflow defaults", () => {
       OPENWIKI_PROVIDER: "anthropic",
       OPENWIKI_MODEL_ID: "claude-sonnet-5",
     });
+
+    const defaults: NodeJS.ProcessEnv = {};
+    applyPersonalWorkflowEnvironmentDefaults(defaults);
+    expect(defaults.OPENAI_COMPATIBLE_API_KEY).toBe(PERSONAL_LITELLM_API_KEY);
+  });
+
+  test("sends the built-in local gateway credential during health checks", async () => {
+    const env: NodeJS.ProcessEnv = {};
+    applyPersonalWorkflowEnvironmentDefaults(env);
+    const fetchImpl = vi.fn(() =>
+      Promise.resolve(new Response("", { status: 200 })),
+    );
+
+    await verifyPersonalLiteLlmGateway(env, fetchImpl);
+
+    expect(fetchImpl).toHaveBeenCalledWith(
+      new URL(`${PERSONAL_LITELLM_BASE_URL}/models`),
+      expect.objectContaining({
+        headers: { authorization: `Bearer ${PERSONAL_LITELLM_API_KEY}` },
+      }),
+    );
   });
 
   test("defaults run commands to zh-CN and preserves explicit language", () => {

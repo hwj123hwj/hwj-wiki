@@ -1,6 +1,6 @@
 {
   "name": "hwj-wiki",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A personal Chinese knowledge workflow built as an upstream-compatible OpenWiki distribution.",
   "license": "MIT",
   "type": "module",

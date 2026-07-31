@@ -9,6 +9,7 @@ import {
 export const PERSONAL_DEFAULT_LANGUAGE = "zh-CN";
 export const PERSONAL_LITELLM_BASE_URL = "http://localhost:4001/v1";
 export const PERSONAL_LITELLM_MODEL = "coding";
+export const PERSONAL_LITELLM_API_KEY = "sk-local-gateway-hwj123hwj";
 export const LITELLM_MASTER_KEY_ENV_KEY = "LITELLM_MASTER_KEY";
 
 /**
@@ -44,7 +45,7 @@ export function applyPersonalWorkflowEnvironmentDefaults(
 
   if (!env[OPENAI_COMPATIBLE_API_KEY_ENV_KEY]?.trim()) {
     env[OPENAI_COMPATIBLE_API_KEY_ENV_KEY] =
-      env[LITELLM_MASTER_KEY_ENV_KEY]?.trim() || "local";
+      env[LITELLM_MASTER_KEY_ENV_KEY]?.trim() || PERSONAL_LITELLM_API_KEY;
   }
 }
 
@@ -86,7 +87,7 @@ export async function verifyPersonalLiteLlmGateway(
   let response: Response;
   try {
     response = await fetchImpl(modelsUrl, {
-      headers: key && key !== "local" ? { authorization: `Bearer ${key}` } : {},
+      headers: key ? { authorization: `Bearer ${key}` } : {},
       signal: AbortSignal.timeout(5_000),
     });
   } catch (error) {
