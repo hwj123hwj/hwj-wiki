@@ -22,8 +22,8 @@ describe("OPENWIKI_VERSION", () => {
   });
 
   it("never falls back to the unknown sentinel in this repo", () => {
-    // The reader returns "0.0.0-unknown" only when no openwiki package.json can
-    // be found. Running from source, it must always locate the real manifest.
+    // The reader returns "0.0.0-unknown" only when no recognized OpenWiki
+    // distribution package.json can be found. Source runs must find this one.
     expect(OPENWIKI_VERSION).not.toBe("0.0.0-unknown");
     expect(OPENWIKI_VERSION).toMatch(/^\d+\.\d+\.\d+/u);
   });

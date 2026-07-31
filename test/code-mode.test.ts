@@ -143,8 +143,8 @@ describe("ensureCodeModeRepoSetup workflow", () => {
     );
     // Installing an unpinned package in a privileged CI context is a supply-chain
     // risk; the generated workflow must pin openwiki to the shipping version.
-    expect(workflow).toMatch(/npm install --global openwiki@\d+\.\d+\.\d+ /u);
-    expect(workflow).not.toMatch(/--global openwiki(?![@\d])/u);
+    expect(workflow).toMatch(/npm install --global hwj-wiki@\d+\.\d+\.\d+ /u);
+    expect(workflow).not.toMatch(/--global hwj-wiki(?![@\d])/u);
   });
 
   test("does not create a workflow unless explicitly requested", async () => {

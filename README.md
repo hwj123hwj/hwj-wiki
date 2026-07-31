@@ -11,7 +11,13 @@ openwiki code --update
 openwiki personal --update
 ```
 
-从 GitHub 安装当前个人版本：
+从 npm 安装：
+
+```bash
+npm install --global hwj-wiki
+```
+
+也可以直接从 GitHub 安装开发版本：
 
 ```bash
 npm install --global github:hwj123hwj/hwj-wiki
@@ -38,19 +44,19 @@ OpenWiki is a CLI that writes and maintains agent wikis for codebases or purpose
 ## Install
 
 ```sh
-npm install -g openwiki
+npm install -g hwj-wiki
 ```
 
 On Windows, prefer installing OpenWiki with Node.js package managers such as
 `npm` or `pnpm`:
 
 ```sh
-npm install -g openwiki
+npm install -g hwj-wiki
 # or
-pnpm add -g openwiki
+pnpm add -g hwj-wiki
 ```
 
-`bun install -g openwiki` can fall back to compiling OpenWiki's `better-sqlite3`
+`bun install -g hwj-wiki` can fall back to compiling OpenWiki's `better-sqlite3`
 checkpointing dependency. Before using that path, install Visual Studio Build
 Tools with the Desktop development with C++ workload. Bun does not run lifecycle
 scripts from installed packages by default, so it cannot display a package-level

@@ -1,6 +1,6 @@
 {
-  "name": "openwiki",
-  "version": "0.2.4",
+  "name": "hwj-wiki",
+  "version": "0.1.0",
   "description": "A personal Chinese knowledge workflow built as an upstream-compatible OpenWiki distribution.",
   "license": "MIT",
   "type": "module",
@@ -18,6 +18,9 @@
     "url": "https://github.com/hwj123hwj/hwj-wiki/issues"
   },
   "homepage": "https://github.com/hwj123hwj/hwj-wiki#readme",
+  "publishConfig": {
+    "access": "public"
+  },
   "files": [
     "dist",
     "skills",

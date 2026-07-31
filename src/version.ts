@@ -32,15 +32,17 @@ interface OwnPackageJson {
  * version read never throws and never breaks a run).
  */
 const UNKNOWN_VERSION = "0.0.0-unknown";
+const OPENWIKI_PACKAGE_NAMES = new Set(["hwj-wiki", "openwiki"]);
 
 /**
  * Reads OpenWiki's own version from its `package.json` at module load, so the
  * runtime version can never drift from the published one. Starts at this
  * module's own location (`import.meta.url`) and walks up the directory tree,
- * accepting the first `package.json` whose `name` is `"openwiki"`. This works
+ * accepting the first `package.json` whose name is this distribution or the
+ * upstream package. This works
  * from source (`src/version.ts`), from the built `dist/`, and from an installed
- * `node_modules/openwiki/dist/`, because every one of those sits below the
- * manifest we are looking for.
+ * `node_modules/hwj-wiki/dist/` (or upstream `openwiki/dist/`), because every
+ * one of those sits below the manifest we are looking for.
  */
 function readOwnVersion(): string {
   let dir = path.dirname(fileURLToPath(import.meta.url));
@@ -51,7 +53,11 @@ function readOwnVersion(): string {
         readFileSync(path.join(dir, "package.json"), "utf8"),
       ) as OwnPackageJson;
 
-      if (pkg.name === "openwiki" && typeof pkg.version === "string") {
+      if (
+        pkg.name !== undefined &&
+        OPENWIKI_PACKAGE_NAMES.has(pkg.name) &&
+        typeof pkg.version === "string"
+      ) {
         return pkg.version;
       }
     } catch {
