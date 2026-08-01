@@ -15,7 +15,10 @@ import {
   FilesystemBackend,
   type FilesystemPermission,
 } from "deepagents";
-import { createOpenWikiConnectorTools } from "../connectors/tools.js";
+import {
+  createOpenWikiConnectorTools,
+  createPersonalHistoryConnectorTools,
+} from "../connectors/tools.js";
 import {
   DEBUG_ENV_KEYS,
   loadOpenWikiEnv,
@@ -36,6 +39,7 @@ import {
 } from "../okf/index-labels.js";
 import { OpenWikiLocalShellBackend } from "./docs-only-backend.js";
 import { createOpenWikiIndexMiddleware } from "./okf-middleware.js";
+import { createPersonalToolStartMiddleware } from "./personal-tool-middleware.js";
 import {
   createWikiTranslationMiddleware,
   resolveTranslationPlan,
@@ -324,13 +328,19 @@ async function runOpenWikiAgentCore(
   const conceptType = resolveConceptTypeLabel(context.language);
   const agent = createDeepAgent({
     model,
-    tools: createOpenWikiConnectorTools(),
+    tools:
+      outputMode === "local-wiki"
+        ? createPersonalHistoryConnectorTools()
+        : createOpenWikiConnectorTools(),
     checkpointer,
     backend,
     middleware:
       command === "chat"
         ? []
         : [
+            ...(outputMode === "local-wiki"
+              ? [createPersonalToolStartMiddleware()]
+              : []),
             ...(translation
               ? [
                   createWikiTranslationMiddleware(

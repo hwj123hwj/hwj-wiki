@@ -74,7 +74,17 @@ openwiki personal --update
 
 - Code Mode 只接收 `cwd` 位于当前仓库或同一 Git Worktree 的会话。
 - Personal Mode 和 Code Mode 使用相互独立的游标。
-- JSONL 以字节 Offset 和已处理前缀 SHA-256 判断追加、截断与重写。
+- JSONL 使用流式字节 Offset 和固定头部摘要判断追加、截断与重写；单次最多
+  扫描 32MB，因此多 GB 会话文件不会再整体载入内存。
+- Antigravity 的 `.system_generated/` 内部日志不进入知识整理。
+- 每轮最多向 Agent 提供约 100 条或 100KB 的待处理证据，剩余批次后续继续。
+- 若本地模型在完整 Agent 协议中没有实际执行工具，个人模式使用受限安全降级：
+  直接读取已脱敏证据，限制输出目录并校验页面后再确认批次。
+- Agent 只能通过受限的 `openwiki_read_personal_history_batch` 工具读取本轮批次，
+  不会收到主机绝对路径。
+- 批次只有在全部读取且生成了有效 Wiki 后才写入处理回执；失败会自动重试。
+- Init/Update 必须产生有效 `quickstart.md` 和至少一个知识页面，否则标记为
+  `interrupted`，不会再出现空 Wiki 的假成功。
 - 只采集用户/助手文本，不采集 System/Developer 指令。
 - 私钥、Token、Key、密码、长 Base64 和用户主目录在写缓存前脱敏。
 - 单条超大记录最多保留约 50KB 的头尾内容。

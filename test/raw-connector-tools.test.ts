@@ -22,6 +22,19 @@ afterEach(async () => {
 });
 
 describe("raw connector tools", () => {
+  test("personal mode exposes only the bounded history reader", async () => {
+    const home = await createTempHome();
+    vi.resetModules();
+    process.env.HOME = home;
+    process.env.USERPROFILE = home;
+    const { createPersonalHistoryConnectorTools } =
+      await import("../src/connectors/tools.ts");
+
+    expect(
+      createPersonalHistoryConnectorTools().map((tool) => tool.name),
+    ).toEqual(["openwiki_read_personal_history_batch"]);
+  });
+
   test("lists raw files with POSIX separators before latest-run filtering", async () => {
     const home = await createTempHome();
     await writeRawFile(home, "x", "2026-07-19T000000Z/old.json", "{}");
@@ -77,6 +90,31 @@ describe("raw connector tools", () => {
         "normal.json",
       ),
     );
+  });
+
+  test("reads selected personal history without exposing its host path", async () => {
+    const home = await createTempHome();
+    await writeRawFile(
+      home,
+      "codex-history",
+      "2026-08-01T000000Z/records-0001.json",
+      '{"records":[{"text":"durable decision"}]}',
+    );
+    const tools = await loadConnectorTools(home);
+    const result = await invokeJson<{
+      connectorId: string;
+      content: string;
+      filePath?: string;
+      path: string;
+    }>(getTool(tools, "openwiki_read_personal_history_batch"), {
+      connectorId: "codex-history",
+      path: "2026-08-01T000000Z/records-0001.json",
+    });
+
+    expect(result.connectorId).toBe("codex-history");
+    expect(result.path).toBe("2026-08-01T000000Z/records-0001.json");
+    expect(result.content).toContain("durable decision");
+    expect(result.filePath).toBeUndefined();
   });
 
   test("rejects symlink raw item paths before reading", async () => {

@@ -4,6 +4,7 @@ import {
   chmod,
   lstat,
   mkdir,
+  open,
   readFile,
   readdir,
   rename,
@@ -23,6 +24,10 @@ import {
 const execFileAsync = promisify(execFile);
 const MAX_RECORD_TEXT_BYTES = 50_000;
 const MAX_RAW_BATCH_BYTES = 80_000;
+const MAX_RUN_RECORDS = 100;
+const MAX_RUN_RAW_BYTES = 100_000;
+const MAX_JSONL_SCAN_BYTES = 32 * 1024 * 1024;
+const PREFIX_SAMPLE_BYTES = 64 * 1024;
 const PRIVATE_FILE_MODE = 0o600;
 const PRIVATE_DIR_MODE = 0o700;
 
@@ -40,9 +45,24 @@ export interface PersonalHistoryRecord {
 
 export type PersonalHistorySource = "antigravity" | "codex" | "doubao" | "pi";
 
+export const PERSONAL_HISTORY_CONNECTOR_IDS = [
+  "pi-history",
+  "codex-history",
+  "antigravity-history",
+  "doubao-export",
+] as const;
+
+export type PersonalHistoryConnectorId =
+  (typeof PERSONAL_HISTORY_CONNECTOR_IDS)[number];
+
 interface FileState {
   byteOffset: number;
+  belongsToRepository?: boolean;
+  headBytes?: number;
+  headHash?: string;
+  itemOffset?: number;
   prefixHash: string;
+  sessionId?: string;
   size: number;
 }
 
@@ -52,7 +72,7 @@ interface HistoryState {
 }
 
 interface SourceDefinition {
-  connectorId: string;
+  connectorId: PersonalHistoryConnectorId;
   format: "doubao" | "jsonl";
   root: string;
   source: PersonalHistorySource;
@@ -66,10 +86,27 @@ export interface CollectPersonalHistoryOptions {
 }
 
 export interface PersonalHistoryCollection {
+  backlogBatchCount: number;
+  batches: PersonalHistoryBatch[];
   rawFiles: string[];
   recordCount: number;
+  scopeKey: string;
   sources: PersonalHistorySource[];
   warnings: string[];
+}
+
+export interface PersonalHistoryBatch {
+  byteSize: number;
+  connectorId: PersonalHistoryConnectorId;
+  key: string;
+  path: string;
+  recordCount: number;
+  source: PersonalHistorySource;
+}
+
+interface ProcessingReceipt {
+  processed: string[];
+  version: 1;
 }
 
 /**
@@ -85,10 +122,7 @@ export async function collectPersonalHistory(
   const definitions = sourceDefinitions(options.roots).filter(
     (definition) => mode === "personal" || definition.source !== "doubao",
   );
-  const rawFiles: string[] = [];
-  const sources: PersonalHistorySource[] = [];
   const warnings: string[] = [];
-  let recordCount = 0;
 
   const canonicalRepoRoot =
     mode === "code" ? await canonicalizeExistingPath(repoRoot) : repoRoot;
@@ -97,21 +131,90 @@ export async function collectPersonalHistory(
       ? "personal"
       : `code-${sha256(canonicalRepoRoot).slice(0, 16)}`;
 
+  if (mode === "personal") {
+    warnings.push(...(await migrateLegacyAntigravityCache(options.stateRoot)));
+  }
+
+  let pending = await selectPendingBatches(scopeKey, mode, options.stateRoot);
+  if (pending.batches.length > 0) {
+    return collectionFromPending(
+      scopeKey,
+      pending,
+      warnings,
+      options.stateRoot,
+    );
+  }
+
+  let remainingRecords = MAX_RUN_RECORDS;
+
   for (const definition of definitions) {
+    if (remainingRecords <= 0) break;
     const result = await collectSource(
       definition,
       mode,
       canonicalRepoRoot,
       scopeKey,
       options.stateRoot,
+      remainingRecords,
     );
     warnings.push(...result.warnings);
-    rawFiles.push(...result.rawFiles);
-    if (result.records.length > 0) sources.push(definition.source);
-    recordCount += result.records.length;
+    remainingRecords -= result.records.length;
   }
 
-  return { rawFiles, recordCount, sources, warnings };
+  pending = await selectPendingBatches(scopeKey, mode, options.stateRoot);
+  return collectionFromPending(scopeKey, pending, warnings, options.stateRoot);
+}
+
+export async function acknowledgePersonalHistoryBatches(
+  collection: PersonalHistoryCollection,
+  stateRoot?: string,
+): Promise<void> {
+  const byConnector = new Map<PersonalHistoryConnectorId, string[]>();
+  for (const batch of collection.batches) {
+    const keys = byConnector.get(batch.connectorId) ?? [];
+    keys.push(batch.key);
+    byConnector.set(batch.connectorId, keys);
+  }
+
+  for (const [connectorId, keys] of byConnector) {
+    const storage = await resolveStorage(connectorId, stateRoot);
+    const receiptPath = path.join(
+      storage.connectorDir,
+      `processed-${collection.scopeKey}.json`,
+    );
+    const receipt = await readProcessingReceipt(receiptPath);
+    await writePrivateJsonAtomic(receiptPath, {
+      processed: [...new Set([...receipt.processed, ...keys])].sort(),
+      version: 1,
+    } satisfies ProcessingReceipt);
+  }
+}
+
+function collectionFromPending(
+  scopeKey: string,
+  pending: { backlogBatchCount: number; batches: PersonalHistoryBatch[] },
+  warnings: string[],
+  stateRoot?: string,
+): PersonalHistoryCollection {
+  return {
+    backlogBatchCount: pending.backlogBatchCount,
+    batches: pending.batches,
+    rawFiles: pending.batches.map((batch) =>
+      path.join(
+        stateRoot
+          ? path.join(stateRoot, batch.connectorId, "raw")
+          : getConnectorRawDir(batch.connectorId),
+        ...batch.path.split("/"),
+      ),
+    ),
+    recordCount: pending.batches.reduce(
+      (total, batch) => total + batch.recordCount,
+      0,
+    ),
+    scopeKey,
+    sources: [...new Set(pending.batches.map((batch) => batch.source))],
+    warnings,
+  };
 }
 
 async function collectSource(
@@ -120,6 +223,7 @@ async function collectSource(
   repoRoot: string,
   scopeKey: string,
   stateRoot?: string,
+  maxRecords = MAX_RUN_RECORDS,
 ): Promise<{
   rawFiles: string[];
   records: PersonalHistoryRecord[];
@@ -133,11 +237,12 @@ async function collectSource(
   const statePath = path.join(storage.connectorDir, `state-${scopeKey}.json`);
   const state = await readState(statePath);
   const nextState: HistoryState = { files: { ...state.files }, version: 1 };
-  const files = await listSourceFiles(definition.root, definition.format);
+  const files = await listSourceFiles(definition.root, definition);
   const records: PersonalHistoryRecord[] = [];
   const warnings: string[] = [];
 
   for (const filePath of files) {
+    if (records.length >= maxRecords) break;
     const relativePath = path
       .relative(definition.root, filePath)
       .split(path.sep)
@@ -152,11 +257,13 @@ async function collectSource(
               state.files[relativePath],
               mode,
               repoRoot,
+              maxRecords - records.length,
             )
           : await collectDoubaoFile(
               filePath,
               relativePath,
               state.files[relativePath],
+              maxRecords - records.length,
             );
       records.push(...result.records);
       nextState.files[relativePath] = result.state;
@@ -184,6 +291,7 @@ async function collectSource(
         batchCount: batches.length,
         generatedAt: new Date().toISOString(),
         records: batch,
+        scopeKey,
         source: definition.source,
         warningCount: warnings.length,
       });
@@ -221,6 +329,190 @@ function splitRecordBatches(
   return batches;
 }
 
+async function selectPendingBatches(
+  scopeKey: string,
+  mode: PersonalWorkflowMode,
+  stateRoot?: string,
+): Promise<{ backlogBatchCount: number; batches: PersonalHistoryBatch[] }> {
+  const pending: PersonalHistoryBatch[] = [];
+
+  for (const connectorId of PERSONAL_HISTORY_CONNECTOR_IDS) {
+    const storage = await resolveStorage(connectorId, stateRoot);
+    const receipt = await readProcessingReceipt(
+      path.join(storage.connectorDir, `processed-${scopeKey}.json`),
+    );
+    const processed = new Set(receipt.processed);
+    const source = sourceForConnector(connectorId);
+
+    for (const relativePath of await listRawBatchFiles(storage.rawDir)) {
+      if (processed.has(relativePath)) continue;
+      const filePath = path.join(
+        storage.rawDir,
+        ...relativePath.split(path.posix.sep),
+      );
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(await readFile(filePath, "utf8")) as unknown;
+      } catch {
+        continue;
+      }
+      if (!isRecord(parsed) || !Array.isArray(parsed.records)) continue;
+      const batchScope = stringValue(parsed.scopeKey);
+      const isLegacyPersonalBatch =
+        batchScope === undefined &&
+        mode === "personal" &&
+        connectorId !== "antigravity-history";
+      if (batchScope !== scopeKey && !isLegacyPersonalBatch) continue;
+      const fileStat = await stat(filePath);
+      pending.push({
+        byteSize: fileStat.size,
+        connectorId,
+        key: relativePath,
+        path: relativePath,
+        recordCount: parsed.records.length,
+        source,
+      });
+    }
+  }
+
+  pending.sort((left, right) =>
+    `${left.path}\0${left.connectorId}`.localeCompare(
+      `${right.path}\0${right.connectorId}`,
+    ),
+  );
+  const selected: PersonalHistoryBatch[] = [];
+  let selectedBytes = 0;
+  let selectedRecords = 0;
+  for (const batch of pending) {
+    if (
+      selected.length > 0 &&
+      (selectedBytes + batch.byteSize > MAX_RUN_RAW_BYTES ||
+        selectedRecords + batch.recordCount > MAX_RUN_RECORDS)
+    ) {
+      break;
+    }
+    selected.push(batch);
+    selectedBytes += batch.byteSize;
+    selectedRecords += batch.recordCount;
+  }
+
+  return { backlogBatchCount: pending.length, batches: selected };
+}
+
+async function listRawBatchFiles(
+  root: string,
+  current = root,
+): Promise<string[]> {
+  let entries;
+  try {
+    entries = await readdir(current, { withFileTypes: true });
+  } catch (error) {
+    if (isFileNotFoundError(error)) return [];
+    throw error;
+  }
+
+  const result: string[] = [];
+  for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+    if (entry.isSymbolicLink()) continue;
+    const entryPath = path.join(current, entry.name);
+    if (entry.isDirectory()) {
+      result.push(...(await listRawBatchFiles(root, entryPath)));
+    } else if (entry.isFile() && /^records-\d+\.json$/u.test(entry.name)) {
+      result.push(path.relative(root, entryPath).split(path.sep).join("/"));
+    }
+  }
+  return result;
+}
+
+async function migrateLegacyAntigravityCache(
+  stateRoot?: string,
+): Promise<string[]> {
+  const storage = await resolveStorage("antigravity-history", stateRoot);
+  const markerPath = path.join(
+    storage.connectorDir,
+    "migration-v2-personal.json",
+  );
+  if (await fileExists(markerPath)) return [];
+
+  const legacyPaths: string[] = [];
+  for (const relativePath of await listRawBatchFiles(storage.rawDir)) {
+    try {
+      const parsed = JSON.parse(
+        await readFile(path.join(storage.rawDir, relativePath), "utf8"),
+      ) as unknown;
+      if (isRecord(parsed) && parsed.scopeKey === undefined) {
+        legacyPaths.push(relativePath);
+      }
+    } catch {
+      // A malformed cache is ignored by pending-batch selection as well.
+    }
+  }
+
+  if (legacyPaths.length > 0) {
+    // Version 0.1.x mixed canonical Antigravity sessions with generated logs.
+    // Preserve the old cache for audit/recovery, but rescan canonical files with
+    // the new directory filter instead of feeding the noisy legacy batches.
+    await writePrivateJsonAtomic(
+      path.join(storage.connectorDir, "state-personal.json"),
+      { files: {}, version: 1 } satisfies HistoryState,
+    );
+    const receiptPath = path.join(
+      storage.connectorDir,
+      "processed-personal.json",
+    );
+    const receipt = await readProcessingReceipt(receiptPath);
+    await writePrivateJsonAtomic(receiptPath, {
+      processed: [...new Set([...receipt.processed, ...legacyPaths])].sort(),
+      version: 1,
+    } satisfies ProcessingReceipt);
+  }
+  await writePrivateJsonAtomic(markerPath, {
+    ignoredLegacyRaw: legacyPaths.length,
+    migratedAt: new Date().toISOString(),
+    version: 1,
+  });
+
+  return legacyPaths.length > 0
+    ? [
+        "已保留但跳过旧版 Antigravity 混合日志缓存；后续将仅重新扫描正式会话文件。",
+      ]
+    : [];
+}
+
+async function readProcessingReceipt(
+  filePath: string,
+): Promise<ProcessingReceipt> {
+  try {
+    const parsed = JSON.parse(await readFile(filePath, "utf8")) as unknown;
+    if (isRecord(parsed) && Array.isArray(parsed.processed)) {
+      return {
+        processed: parsed.processed.filter(
+          (value): value is string => typeof value === "string",
+        ),
+        version: 1,
+      };
+    }
+  } catch (error) {
+    if (!isFileNotFoundError(error)) throw error;
+  }
+  return { processed: [], version: 1 };
+}
+
+function sourceForConnector(
+  connectorId: PersonalHistoryConnectorId,
+): PersonalHistorySource {
+  switch (connectorId) {
+    case "pi-history":
+      return "pi";
+    case "codex-history":
+      return "codex";
+    case "antigravity-history":
+      return "antigravity";
+    case "doubao-export":
+      return "doubao";
+  }
+}
+
 async function collectJsonlFile(
   source: Exclude<PersonalHistorySource, "doubao">,
   filePath: string,
@@ -228,69 +520,122 @@ async function collectJsonlFile(
   previous: FileState | undefined,
   mode: PersonalWorkflowMode,
   repoRoot: string,
+  maxRecords: number,
 ): Promise<{
   records: PersonalHistoryRecord[];
   state: FileState;
   warnings: string[];
 }> {
-  const bytes = await readFile(filePath);
-  const completeLength = lastCompleteLineOffset(bytes);
-  const previousOffset = validPreviousOffset(bytes, previous);
-  const startOffset = previousOffset ?? 0;
-  const allText = bytes.subarray(0, completeLength).toString("utf8");
-  const allLines = allText ? allText.split("\n").filter(Boolean) : [];
-  const parsedAll: unknown[] = [];
-  const warnings: string[] = [];
-
-  for (const [index, line] of allLines.entries()) {
-    try {
-      parsedAll.push(JSON.parse(line) as unknown);
-    } catch {
-      warnings.push(`${relativePath}:${index + 1}: invalid JSONL line skipped`);
-    }
-  }
-
+  const fileStat = await stat(filePath);
+  const startOffset = await validPreviousOffset(
+    filePath,
+    fileStat.size,
+    previous,
+  );
+  const window = await readJsonlWindow(filePath, startOffset);
+  const parsedEvents = window.lines.map((line) => line.event);
   const belongs =
     mode === "personal" ||
-    (await sessionBelongsToRepository(parsedAll, repoRoot));
+    previous?.belongsToRepository === true ||
+    (await sessionBelongsToRepository(parsedEvents, repoRoot));
   const sessionId =
-    findSessionId(parsedAll) ?? sha256(relativePath).slice(0, 16);
-  const suffix = bytes.subarray(startOffset, completeLength).toString("utf8");
+    previous?.sessionId ??
+    findSessionId(parsedEvents) ??
+    sha256(relativePath).slice(0, 16);
   const records: PersonalHistoryRecord[] = [];
+  let processedOffset = startOffset;
 
-  if (belongs && suffix) {
-    for (const [index, line] of suffix.split("\n").filter(Boolean).entries()) {
-      try {
-        const event = JSON.parse(line) as unknown;
-        const record = normalizeJsonlEvent(
-          source,
-          sessionId,
-          event,
-          startOffset,
-          index,
-        );
-        if (record) records.push(record);
-      } catch {
-        // The full-file pass already emits a stable line warning.
-      }
+  for (const [index, line] of window.lines.entries()) {
+    const record = belongs
+      ? normalizeJsonlEvent(source, sessionId, line.event, startOffset, index)
+      : undefined;
+    if (record) {
+      if (records.length >= maxRecords) break;
+      records.push(record);
     }
+    processedOffset = line.endOffset;
   }
+
+  const warnings =
+    window.invalidLineCount > 0
+      ? [
+          `${relativePath}: ${window.invalidLineCount} invalid JSONL line(s) skipped in this scan window`,
+        ]
+      : [];
+  const headBytes = Math.min(fileStat.size, PREFIX_SAMPLE_BYTES);
+  const headHash = await hashFileHead(filePath, fileStat.size, headBytes);
 
   return {
     records,
     state: {
-      byteOffset: completeLength,
-      prefixHash: sha256Bytes(bytes.subarray(0, completeLength)),
-      size: bytes.length,
+      belongsToRepository: belongs,
+      byteOffset: processedOffset,
+      headBytes,
+      headHash,
+      prefixHash: headHash,
+      sessionId,
+      size: fileStat.size,
     },
     warnings,
   };
+}
+
+async function readJsonlWindow(
+  filePath: string,
+  startOffset: number,
+): Promise<{
+  invalidLineCount: number;
+  lines: Array<{ endOffset: number; event: unknown }>;
+}> {
+  const fileHandle = await open(filePath, "r");
+  const stream = fileHandle.createReadStream({
+    autoClose: false,
+    highWaterMark: 64 * 1024,
+    start: startOffset,
+  });
+  const lines: Array<{ endOffset: number; event: unknown }> = [];
+  let buffer = Buffer.alloc(0);
+  let consumed = 0;
+  let invalidLineCount = 0;
+
+  try {
+    for await (const chunk of stream) {
+      buffer = Buffer.concat([buffer, Buffer.from(chunk)]);
+      let newlineIndex = buffer.indexOf(0x0a);
+      while (newlineIndex !== -1) {
+        const lineBytes = buffer.subarray(0, newlineIndex);
+        const endOffset = startOffset + consumed + newlineIndex + 1;
+        buffer = buffer.subarray(newlineIndex + 1);
+        consumed += newlineIndex + 1;
+        const text = lineBytes.toString("utf8").trim();
+        if (text) {
+          try {
+            lines.push({ endOffset, event: JSON.parse(text) as unknown });
+          } catch {
+            invalidLineCount += 1;
+          }
+        }
+        if (consumed >= MAX_JSONL_SCAN_BYTES) {
+          stream.destroy();
+          break;
+        }
+        newlineIndex = buffer.indexOf(0x0a);
+      }
+      if (consumed >= MAX_JSONL_SCAN_BYTES) break;
+    }
+  } finally {
+    stream.destroy();
+    await fileHandle.close();
+  }
+
+  return { invalidLineCount, lines };
 }
 
 async function collectDoubaoFile(
   filePath: string,
   relativePath: string,
   previous: FileState | undefined,
+  maxRecords: number,
 ): Promise<{
   records: PersonalHistoryRecord[];
   state: FileState;
@@ -306,7 +651,8 @@ async function collectDoubaoFile(
   if (
     previous !== undefined &&
     previous.size === bytes.length &&
-    previous.prefixHash === digest
+    previous.prefixHash === digest &&
+    previous.itemOffset === undefined
   ) {
     return { records: [], state: nextState, warnings: [] };
   }
@@ -342,10 +688,17 @@ async function collectDoubaoFile(
     };
   }
 
-  const messages =
-    isRecord(parsed) && Array.isArray(parsed.messages) ? parsed.messages : [];
+  const messages: unknown[] =
+    isRecord(parsed) && Array.isArray(parsed.messages)
+      ? (parsed.messages as unknown[])
+      : [];
   const records: PersonalHistoryRecord[] = [];
-  for (const [index, message] of messages.entries()) {
+  const startIndex =
+    previous?.prefixHash === digest ? (previous.itemOffset ?? 0) : 0;
+  let nextIndex = startIndex;
+  for (let index = startIndex; index < messages.length; index += 1) {
+    const message = messages[index];
+    nextIndex = index + 1;
     if (!isRecord(message)) continue;
     const role = stringValue(message.role);
     if (role !== "user" && role !== "assistant") continue;
@@ -366,9 +719,17 @@ async function collectDoubaoFile(
         timestamp,
       ),
     );
+    if (records.length >= maxRecords) break;
   }
 
-  return { records, state: nextState, warnings: [] };
+  return {
+    records,
+    state: {
+      ...nextState,
+      ...(nextIndex < messages.length ? { itemOffset: nextIndex } : {}),
+    },
+    warnings: [],
+  };
 }
 
 function normalizeJsonlEvent(
@@ -588,18 +949,27 @@ async function resolveStorage(connectorId: string, stateRoot?: string) {
 
 async function listSourceFiles(
   root: string,
-  format: SourceDefinition["format"],
+  definition: Pick<SourceDefinition, "format" | "source">,
 ): Promise<string[]> {
   const result: string[] = [];
   const entries = await readdir(root, { withFileTypes: true });
   for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
     if (entry.isSymbolicLink()) continue;
+    if (
+      definition.source === "antigravity" &&
+      entry.isDirectory() &&
+      entry.name === ".system_generated"
+    ) {
+      continue;
+    }
     const entryPath = path.join(root, entry.name);
     if (entry.isDirectory()) {
-      result.push(...(await listSourceFiles(entryPath, format)));
+      result.push(...(await listSourceFiles(entryPath, definition)));
     } else if (
       entry.isFile() &&
-      (format === "jsonl" ? /\.jsonl$/iu : /\.(?:json|md)$/iu).test(entry.name)
+      (definition.format === "jsonl" ? /\.jsonl$/iu : /\.(?:json|md)$/iu).test(
+        entry.name,
+      )
     ) {
       result.push(entryPath);
     }
@@ -607,20 +977,38 @@ async function listSourceFiles(
   return result;
 }
 
-function validPreviousOffset(
-  bytes: Buffer,
+async function validPreviousOffset(
+  filePath: string,
+  fileSize: number,
   previous: FileState | undefined,
-): number | undefined {
-  if (!previous || previous.byteOffset > bytes.length) return undefined;
-  const prefix = bytes.subarray(0, previous.byteOffset);
-  return sha256Bytes(prefix) === previous.prefixHash
+): Promise<number> {
+  if (!previous || previous.byteOffset > fileSize) return 0;
+  if (!previous.headHash) {
+    // Version-1 states used a full-prefix digest. Trust the durable offset once
+    // during migration; all subsequently written states carry a bounded head
+    // digest so multi-gigabyte files never need to be loaded in full.
+    return previous.byteOffset;
+  }
+  return (await hashFileHead(filePath, fileSize, previous.headBytes)) ===
+    previous.headHash
     ? previous.byteOffset
-    : undefined;
+    : 0;
 }
 
-function lastCompleteLineOffset(bytes: Buffer): number {
-  const lastNewline = bytes.lastIndexOf(0x0a);
-  return lastNewline === -1 ? 0 : lastNewline + 1;
+async function hashFileHead(
+  filePath: string,
+  fileSize: number,
+  sampleBytes = Math.min(fileSize, PREFIX_SAMPLE_BYTES),
+): Promise<string> {
+  const fileHandle = await open(filePath, "r");
+  try {
+    const length = Math.min(fileSize, sampleBytes);
+    const buffer = Buffer.alloc(length);
+    const { bytesRead } = await fileHandle.read(buffer, 0, length, 0);
+    return sha256Bytes(buffer.subarray(0, bytesRead));
+  } finally {
+    await fileHandle.close();
+  }
 }
 
 function findSessionId(events: unknown[]): string | undefined {
@@ -761,6 +1149,24 @@ async function isDirectory(filePath: string): Promise<boolean> {
     }
     throw error;
   }
+}
+
+async function fileExists(filePath: string): Promise<boolean> {
+  try {
+    await lstat(filePath);
+    return true;
+  } catch (error) {
+    if (isFileNotFoundError(error)) return false;
+    throw error;
+  }
+}
+
+function isFileNotFoundError(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    "code" in error &&
+    (error as NodeJS.ErrnoException).code === "ENOENT"
+  );
 }
 
 function normalizeTimestamp(value: unknown): string | undefined {

@@ -12,6 +12,10 @@ import {
   openWikiLocalWikiDir,
   resolveConnectorRawPath,
 } from "../openwiki-home.js";
+import {
+  PERSONAL_HISTORY_CONNECTOR_IDS,
+  type PersonalHistoryConnectorId,
+} from "../personalization/history.js";
 import { createConnectorRegistry, isConnectorId } from "./registry.js";
 import {
   callMcpConnectorTool,
@@ -200,7 +204,43 @@ export function createOpenWikiConnectorTools(): StructuredToolInterface[] {
           ),
         ),
     }),
+    new DynamicStructuredTool({
+      name: "openwiki_read_personal_history_batch",
+      description:
+        'Read one sanitized personal-workflow evidence batch selected for this run. Use only connectorId/path pairs explicitly listed in the run instructions. Input: {"connectorId":"codex-history","path":"2026-.../records-0001.json"}.',
+      schema: {
+        type: "object",
+        properties: {
+          connectorId: {
+            type: "string",
+            enum: PERSONAL_HISTORY_CONNECTOR_IDS,
+          },
+          path: { type: "string" },
+        },
+        required: ["connectorId", "path"],
+        additionalProperties: false,
+      } as const,
+      func: async (input) =>
+        stringifyToolResult(
+          await readPersonalHistoryBatch(
+            getPersonalHistoryConnectorId(input, "connectorId"),
+            getStringInput(input, "path"),
+          ),
+        ),
+    }),
   ];
+}
+
+/**
+ * Personal history is collected deterministically before the agent starts, so
+ * the personal brain only needs the single bounded reader. Keeping unrelated
+ * ingestion and MCP tools out of this mode improves tool selection reliability
+ * for smaller OpenAI-compatible coding models.
+ */
+export function createPersonalHistoryConnectorTools(): StructuredToolInterface[] {
+  return createOpenWikiConnectorTools().filter(
+    (tool) => tool.name === "openwiki_read_personal_history_batch",
+  );
 }
 
 async function listConnectors() {
@@ -303,7 +343,7 @@ async function listRawItems(connectorId: ConnectorId) {
 }
 
 async function readRawItem(
-  connectorId: ConnectorId,
+  connectorId: string,
   relativePath: string,
   maxBytes: number,
 ) {
@@ -331,6 +371,19 @@ async function readRawItem(
   } finally {
     await fileHandle.close();
   }
+}
+
+async function readPersonalHistoryBatch(
+  connectorId: PersonalHistoryConnectorId,
+  relativePath: string,
+) {
+  const result = await readRawItem(connectorId, relativePath, 100_000);
+  return {
+    connectorId,
+    content: result.content,
+    path: relativePath,
+    truncated: result.truncated,
+  };
 }
 
 async function listFiles(
@@ -440,6 +493,21 @@ function getConnectorId(input: unknown, key: string): ConnectorId {
   }
 
   return value;
+}
+
+function getPersonalHistoryConnectorId(
+  input: unknown,
+  key: string,
+): PersonalHistoryConnectorId {
+  const value = getStringInput(input, key);
+  if (
+    !PERSONAL_HISTORY_CONNECTOR_IDS.includes(
+      value as PersonalHistoryConnectorId,
+    )
+  ) {
+    throw new Error(`Invalid personal history connector ID: ${value}`);
+  }
+  return value as PersonalHistoryConnectorId;
 }
 
 function getIngestOptions(input: unknown): ConnectorIngestOptions {

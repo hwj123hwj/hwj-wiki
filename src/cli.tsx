@@ -42,6 +42,7 @@ import {
   sanitizeDiagnosticText,
 } from "./diagnostics.js";
 import { stripHtmlTags } from "./utils.js";
+import { resolveSlashCommandCompletion } from "./slash-completion.js";
 import {
   type OpenWikiRunEvent,
   type OpenWikiRunResult,
@@ -1842,6 +1843,18 @@ function ChatInput({
         moveMenuSelection(state, 1, currentModelId, currentProvider),
       );
       return;
+    }
+
+    if ((key.tab || key.return) && menuState.kind === "commands") {
+      const completion = resolveSlashCommandCompletion(
+        input,
+        slashCommandOptions[menuState.selectedIndex]?.label,
+      );
+      if (completion) {
+        setInputValue(completion);
+        setError(null);
+        return;
+      }
     }
 
     if (key.return) {

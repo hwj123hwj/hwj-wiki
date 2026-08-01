@@ -2,7 +2,10 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
-import { collectPersonalHistory } from "../src/personalization/history.ts";
+import {
+  acknowledgePersonalHistoryBatches,
+  collectPersonalHistory,
+} from "../src/personalization/history.ts";
 
 const temporaryRoots: string[] = [];
 
@@ -69,7 +72,16 @@ describe("personal history collection", () => {
       roots,
       stateRoot,
     });
-    expect(second.recordCount).toBe(0);
+    expect(second.batches.map((batch) => batch.key)).toEqual(
+      first.batches.map((batch) => batch.key),
+    );
+
+    await acknowledgePersonalHistoryBatches(first, stateRoot);
+    const acknowledged = await collectPersonalHistory("code", repo, {
+      roots,
+      stateRoot,
+    });
+    expect(acknowledged.recordCount).toBe(0);
 
     await writeFile(
       session,
@@ -143,5 +155,77 @@ describe("personal history collection", () => {
         })
       ).recordCount,
     ).toBe(1);
+  });
+
+  test("caps each run and continues from the durable scan cursor", async () => {
+    const { repo, roots, stateRoot } = await fixture();
+    const events = [JSON.stringify({ type: "session", id: "many", cwd: repo })];
+    for (let index = 0; index < 500; index += 1) {
+      events.push(
+        JSON.stringify({
+          id: `message-${index}`,
+          message: { content: `记录 ${index}`, role: "user" },
+          type: "message",
+        }),
+      );
+    }
+    await writeFile(
+      path.join(roots.pi, "many.jsonl"),
+      `${events.join("\n")}\n`,
+    );
+
+    const first = await collectPersonalHistory("personal", repo, {
+      roots,
+      stateRoot,
+    });
+    expect(first.recordCount).toBeLessThanOrEqual(100);
+    await acknowledgePersonalHistoryBatches(first, stateRoot);
+
+    const second = await collectPersonalHistory("personal", repo, {
+      roots,
+      stateRoot,
+    });
+    expect(second.recordCount).toBeLessThanOrEqual(100);
+    await acknowledgePersonalHistoryBatches(second, stateRoot);
+
+    let total = first.recordCount + second.recordCount;
+    while (total < 500) {
+      const next = await collectPersonalHistory("personal", repo, {
+        roots,
+        stateRoot,
+      });
+      expect(next.recordCount).toBeLessThanOrEqual(100);
+      total += next.recordCount;
+      await acknowledgePersonalHistoryBatches(next, stateRoot);
+    }
+    expect(total).toBe(500);
+  });
+
+  test("excludes Antigravity generated logs from canonical history", async () => {
+    const { repo, roots, stateRoot } = await fixture();
+    const generated = path.join(
+      roots.antigravity,
+      "brain-id",
+      ".system_generated",
+      "logs",
+    );
+    await mkdir(generated, { recursive: true });
+    await writeFile(
+      path.join(generated, "transcript.jsonl"),
+      `${JSON.stringify({ source: "MODEL", content: "generated noise" })}\n`,
+    );
+    await writeFile(
+      path.join(roots.antigravity, "canonical.jsonl"),
+      `${JSON.stringify({ source: "USER_EXPLICIT", content: "保留的正式会话" })}\n`,
+    );
+
+    const result = await collectPersonalHistory("personal", repo, {
+      roots,
+      stateRoot,
+    });
+    expect(result.recordCount).toBe(1);
+    const raw = await readFile(result.rawFiles[0], "utf8");
+    expect(raw).toContain("保留的正式会话");
+    expect(raw).not.toContain("generated noise");
   });
 });
