@@ -156,6 +156,45 @@ describe("personal wiki deterministic finalization", () => {
     );
   });
 
+  test("redacts personal absolute paths left by an earlier Agent pass", async () => {
+    const { refs, stateRoot, wikiRoot } = await fixture();
+    const sourcesDir = path.join(wikiRoot, "sources");
+    await mkdir(sourcesDir, { recursive: true });
+    await writeFile(
+      path.join(sourcesDir, "index.md"),
+      "# 证据来源\n\n上一轮来源文件：/Users/weijian/Documents/private-export.json\n",
+    );
+    await writeFile(
+      path.join(sourcesDir, "source-evidence-stale.md"),
+      String.raw`---
+title: 旧来源
+---
+
+Windows 路径：C:\Users\weijian\Desktop\private.json
+`,
+    );
+
+    const result = await generatePersonalWikiFallback(
+      wikiRoot,
+      [lesson(refs[0], "历史页面中的本机路径必须自动隐藏。")],
+      "zh-CN",
+      stateRoot,
+    );
+
+    expect(result.report.valid).toBe(true);
+    const sourceIndex = await readFile(
+      path.join(sourcesDir, "index.md"),
+      "utf8",
+    );
+    const staleSource = await readFile(
+      path.join(sourcesDir, "source-evidence-stale.md"),
+      "utf8",
+    );
+    expect(sourceIndex).not.toMatch(/\/Users\/weijian\//u);
+    expect(staleSource).not.toMatch(/[A-Za-z]:\\Users\\weijian\\/u);
+    expect(staleSource).toContain("本地路径已隐藏");
+  });
+
   test("blocks a batch-created page that cannot be traced to its candidates", async () => {
     const { refs, stateRoot, wikiRoot } = await fixture();
     const candidate = lesson(refs[0], "所有新知识必须带来源。");

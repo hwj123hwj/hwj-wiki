@@ -31,8 +31,11 @@ const BATCH_MUTATION_EXEMPT_FILES = new Set([
 ]);
 const SOURCE_REF_PATTERN = /^([a-z][a-z0-9-]{0,63}):(.+)#([a-f0-9]{24})$/u;
 const MARKDOWN_LINK_PATTERN = /!?\[[^\]]*\]\(([^)]+)\)/gu;
+const PERSONAL_POSIX_PATH_PREFIX_PATTERN = /\/(?:Users|home)\/[^/\s]+/gu;
+const PERSONAL_WINDOWS_PATH_PREFIX_PATTERN = /[A-Za-z]:\\Users\\[^\\\s]+/gu;
 const VALID_KNOWLEDGE_TYPES = new Set<string>(KNOWLEDGE_CANDIDATE_TYPES);
 const VALID_CONFIDENCE_LEVELS = new Set<string>(KNOWLEDGE_CONFIDENCE_LEVELS);
+const REDACTED_PERSONAL_PATH = "本地路径已隐藏";
 
 export interface PersonalQualityIssue {
   code: string;
@@ -83,6 +86,10 @@ export async function finalizePersonalWiki(
   options: PersonalFinalizeOptions,
 ): Promise<PersonalFinalizeReport> {
   await ensureQuickstart(wikiRoot);
+  // An earlier Agent pass can leave a host path in an otherwise valid page.
+  // Redact it before rebuilding indexes and running the shared quality gate so
+  // one historical page cannot permanently block every later batch.
+  await redactPersonalAbsolutePaths(wikiRoot);
   const backend = new OpenWikiLocalShellBackend({
     docsOnly: true,
     openWikiIgnore: new OpenWikiIgnore([]),
@@ -106,6 +113,21 @@ export async function finalizePersonalWiki(
     ...(await validateFinalizedWiki(wikiRoot, options)),
     repairedLinks,
   };
+}
+
+async function redactPersonalAbsolutePaths(wikiRoot: string): Promise<void> {
+  for (const relativePath of await listMarkdownFiles(wikiRoot)) {
+    const target = path.join(wikiRoot, ...relativePath.split("/"));
+    const original = await readFile(target, "utf8");
+    const next = redactPersonalPathPrefixes(original);
+    if (next !== original) await writeFileAtomic(target, next);
+  }
+}
+
+function redactPersonalPathPrefixes(content: string): string {
+  return content
+    .replace(PERSONAL_POSIX_PATH_PREFIX_PATTERN, REDACTED_PERSONAL_PATH)
+    .replace(PERSONAL_WINDOWS_PATH_PREFIX_PATTERN, REDACTED_PERSONAL_PATH);
 }
 
 async function ensureQuickstart(wikiRoot: string): Promise<void> {
@@ -684,7 +706,7 @@ function validateSecurityAndLanguage(
   const secretPattern =
     /(?:\bsk-[A-Za-z0-9_-]{12,}\b|\b(?:api[_-]?key|token|secret|password)\s*[:=]\s*(?!\[REDACTED\])[^\s`]{8,})/iu;
   const personalPathPattern =
-    /(?:\/Users\/[^/\s]+\/|\/home\/[^/\s]+\/|[A-Za-z]:\\Users\\[^\\\s]+\\)/u;
+    /(?:\/(?:Users|home)\/[^/\s]+(?:\/|$)|[A-Za-z]:\\Users\\[^\\\s]+(?:\\|$))/u;
 
   for (const page of pages) {
     if (secretPattern.test(page.content)) {
