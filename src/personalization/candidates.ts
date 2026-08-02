@@ -15,7 +15,11 @@ import {
   type PersonalHistoryRecord,
 } from "./history.js";
 
-const EXTRACTION_TIMEOUT_MS = 120_000;
+const DEFAULT_EXTRACTION_TIMEOUT_MS = 120_000;
+const DEFAULT_EXTRACTION_MAX_EVIDENCE_BYTES = 40_000;
+const EXTRACTION_TIMEOUT_ENV_KEY = "OPENWIKI_PERSONAL_EXTRACTION_TIMEOUT_MS";
+const EXTRACTION_MAX_EVIDENCE_ENV_KEY =
+  "OPENWIKI_PERSONAL_EXTRACTION_MAX_BYTES";
 const MAX_CANDIDATES_PER_BATCH = 12;
 const PRIVATE_DIR_MODE = 0o700;
 const PRIVATE_FILE_MODE = 0o600;
@@ -111,65 +115,27 @@ export async function extractKnowledgeCandidates(
     options.stateRoot,
   );
   const parsed = parseRawBatch(rawText, rawPath);
-  const allowedRefs = new Map(
-    parsed.records.map((record) => [sourceRef(batch, record.id), record]),
-  );
   const existing = await readCheckpoint(checkpointPath);
   if (existing?.rawHash === rawHash) {
     const revalidated = parseCandidateResponse(
       JSON.stringify({ candidates: existing.candidates }),
-      allowedRefs,
+      new Map(
+        parsed.records.map((record) => [sourceRef(batch, record.id), record]),
+      ),
       parsed.generatedAt,
     );
     if (revalidated) return { ...existing, candidates: revalidated };
   }
-  const prompt = createCandidateExtractionPrompt(
-    batch,
-    parsed.records,
-    language,
-  );
-  const messages = [
-    new SystemMessage(CANDIDATE_EXTRACTION_SYSTEM_PROMPT),
-    new HumanMessage(prompt),
-  ];
   const invoke =
     options.invokeModel ??
     createDefaultInvoker(modelId, resolveProviderRetryAttempts());
-
-  let output: unknown;
-  let firstError: unknown;
-  try {
-    output = await invokeWithTimeout(invoke, messages);
-  } catch (error) {
-    firstError = error;
-  }
-
-  let candidates = firstError
-    ? undefined
-    : parseCandidateResponse(output, allowedRefs, parsed.generatedAt);
-  if (!candidates) {
-    const repairMessages = [
-      ...messages,
-      new HumanMessage(
-        '上一次输出不是可解析的严格 JSON。请只重新输出一个 JSON 对象，格式为 {"candidates": [...]}；不要解释，不要代码围栏。',
-      ),
-    ];
-    try {
-      output = await invokeWithTimeout(invoke, repairMessages);
-      candidates = parseCandidateResponse(
-        output,
-        allowedRefs,
-        parsed.generatedAt,
-      );
-    } catch (error) {
-      throw new Error(`知识候选提取失败：${errorMessage(error)}`, {
-        cause: error,
-      });
-    }
-  }
-  if (!candidates) {
-    throw new Error("知识候选提取失败：模型连续两次没有返回有效 JSON。");
-  }
+  const candidates = await extractCandidateChunks(
+    batch,
+    parsed.records,
+    language,
+    invoke,
+    parsed.generatedAt,
+  );
 
   const checkpoint: CandidateBatchCheckpoint = {
     batchKey: batch.key,
@@ -292,13 +258,7 @@ export function createCandidateExtractionPrompt(
   records: PersonalHistoryRecord[],
   language: string,
 ): string {
-  const evidence = records.map((record) => ({
-    kind: record.kind,
-    role: record.role,
-    sourceRef: sourceRef(batch, record.id),
-    text: record.text,
-    timestamp: record.timestamp,
-  }));
+  const evidence = candidateEvidence(batch, records);
   return `请用 ${language} 提取知识候选。
 
 每个候选字段：
@@ -331,7 +291,13 @@ function createDefaultInvoker(
   );
   return async (messages) => {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), EXTRACTION_TIMEOUT_MS);
+    const timer = setTimeout(
+      () => controller.abort(),
+      readPositiveIntegerEnv(
+        EXTRACTION_TIMEOUT_ENV_KEY,
+        DEFAULT_EXTRACTION_TIMEOUT_MS,
+      ),
+    );
     try {
       const response = await model.invoke(messages, {
         signal: controller.signal,
@@ -341,6 +307,183 @@ function createDefaultInvoker(
       clearTimeout(timer);
     }
   };
+}
+
+/**
+ * Extracts one original batch in gateway-sized chunks. The local gateway has
+ * a finite upstream request window, while historical batches are deliberately
+ * larger so they remain useful to the normal Agent context. Splitting here
+ * keeps existing raw batches resumable and combines their candidates before
+ * writing the single checkpoint for the original batch.
+ */
+async function extractCandidateChunks(
+  batch: PersonalHistoryBatch,
+  records: PersonalHistoryRecord[],
+  language: string,
+  invoke: (messages: Array<SystemMessage | HumanMessage>) => Promise<unknown>,
+  generatedAt: string | undefined,
+): Promise<KnowledgeCandidate[]> {
+  const chunks = splitRecordsByEvidenceBytes(
+    batch,
+    records,
+    readPositiveIntegerEnv(
+      EXTRACTION_MAX_EVIDENCE_ENV_KEY,
+      DEFAULT_EXTRACTION_MAX_EVIDENCE_BYTES,
+    ),
+  );
+  const candidates: KnowledgeCandidate[] = [];
+  for (const chunk of chunks) {
+    candidates.push(
+      ...(await extractCandidateChunk(
+        batch,
+        chunk,
+        language,
+        invoke,
+        generatedAt,
+      )),
+    );
+  }
+  return deduplicateCandidates(candidates);
+}
+
+async function extractCandidateChunk(
+  batch: PersonalHistoryBatch,
+  records: PersonalHistoryRecord[],
+  language: string,
+  invoke: (messages: Array<SystemMessage | HumanMessage>) => Promise<unknown>,
+  generatedAt: string | undefined,
+): Promise<KnowledgeCandidate[]> {
+  const allowedRefs = new Map(
+    records.map((record) => [sourceRef(batch, record.id), record]),
+  );
+  const messages = [
+    new SystemMessage(CANDIDATE_EXTRACTION_SYSTEM_PROMPT),
+    new HumanMessage(createCandidateExtractionPrompt(batch, records, language)),
+  ];
+
+  let output: unknown;
+  let firstError: unknown;
+  try {
+    output = await invokeWithTimeout(invoke, messages);
+  } catch (error) {
+    if (isRetryableExtractionDeadline(error) && records.length > 1) {
+      return extractAfterSplit(batch, records, language, invoke, generatedAt);
+    }
+    firstError = error;
+  }
+
+  let candidates = firstError
+    ? undefined
+    : parseCandidateResponse(output, allowedRefs, generatedAt);
+  if (!candidates) {
+    const repairMessages = [
+      ...messages,
+      new HumanMessage(
+        '上一次输出不是可解析的严格 JSON。请只重新输出一个 JSON 对象，格式为 {"candidates": [...]}；不要解释，不要代码围栏。',
+      ),
+    ];
+    try {
+      output = await invokeWithTimeout(invoke, repairMessages);
+      candidates = parseCandidateResponse(output, allowedRefs, generatedAt);
+    } catch (error) {
+      if (isRetryableExtractionDeadline(error) && records.length > 1) {
+        return extractAfterSplit(batch, records, language, invoke, generatedAt);
+      }
+      throw new Error(`知识候选提取失败：${errorMessage(error)}`, {
+        cause: error,
+      });
+    }
+  }
+  if (!candidates) {
+    throw new Error("知识候选提取失败：模型连续两次没有返回有效 JSON。");
+  }
+  return candidates;
+}
+
+async function extractAfterSplit(
+  batch: PersonalHistoryBatch,
+  records: PersonalHistoryRecord[],
+  language: string,
+  invoke: (messages: Array<SystemMessage | HumanMessage>) => Promise<unknown>,
+  generatedAt: string | undefined,
+): Promise<KnowledgeCandidate[]> {
+  const midpoint = Math.ceil(records.length / 2);
+  const candidates: KnowledgeCandidate[] = [];
+  for (const chunk of [records.slice(0, midpoint), records.slice(midpoint)]) {
+    if (chunk.length === 0) continue;
+    candidates.push(
+      ...(await extractCandidateChunk(
+        batch,
+        chunk,
+        language,
+        invoke,
+        generatedAt,
+      )),
+    );
+  }
+  return deduplicateCandidates(candidates);
+}
+
+function splitRecordsByEvidenceBytes(
+  batch: PersonalHistoryBatch,
+  records: PersonalHistoryRecord[],
+  maxBytes: number,
+): PersonalHistoryRecord[][] {
+  if (records.length === 0) return [];
+  const chunks: PersonalHistoryRecord[][] = [];
+  let current: PersonalHistoryRecord[] = [];
+  let currentBytes = 0;
+  for (const record of records) {
+    const recordBytes = Buffer.byteLength(
+      JSON.stringify(candidateEvidence(batch, [record])),
+      "utf8",
+    );
+    if (current.length > 0 && currentBytes + recordBytes > maxBytes) {
+      chunks.push(current);
+      current = [];
+      currentBytes = 0;
+    }
+    current.push(record);
+    currentBytes += recordBytes;
+  }
+  if (current.length > 0) chunks.push(current);
+  return chunks;
+}
+
+function candidateEvidence(
+  batch: PersonalHistoryBatch,
+  records: PersonalHistoryRecord[],
+): Array<{
+  kind: string;
+  role?: string;
+  sourceRef: string;
+  text: string;
+  timestamp?: string;
+}> {
+  return records.map((record) => ({
+    kind: record.kind,
+    role: record.role,
+    sourceRef: sourceRef(batch, record.id),
+    text: record.text,
+    timestamp: record.timestamp,
+  }));
+}
+
+function isRetryableExtractionDeadline(error: unknown): boolean {
+  const message = errorMessage(error).toLowerCase();
+  return (
+    message.includes("abort") ||
+    message.includes("timed out") ||
+    message.includes("timeout") ||
+    message.includes("context canceled") ||
+    message.includes("status code 503") ||
+    message.includes("service unavailable")
+  );
+}
+
+function readPositiveIntegerEnv(key: string, fallback: number): number {
+  const value = Number(process.env[key]);
+  return Number.isSafeInteger(value) && value > 0 ? value : fallback;
 }
 
 async function invokeWithTimeout(
