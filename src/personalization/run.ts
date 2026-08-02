@@ -25,6 +25,7 @@ import {
 import { resolveModelId, runOpenWikiAgent } from "../agent/index.js";
 import { resolveConfiguredProvider } from "../constants.js";
 import { loadOpenWikiEnv } from "../env.js";
+import type { RunTelemetryContext } from "../telemetry/index.js";
 import {
   acknowledgeCandidateReview,
   type CandidateReviewTask,
@@ -68,9 +69,11 @@ export async function runPersonalizedOpenWikiAgent(
   command: OpenWikiCommand,
   cwd: string,
   options: OpenWikiRunOptions = {},
+  telemetryContext: RunTelemetryContext = {},
 ): Promise<OpenWikiRunResult> {
   await loadOpenWikiEnv();
   applyPersonalWorkflowEnvironmentDefaults();
+  telemetryContext.provider = resolveConfiguredProvider();
   await verifyPersonalLiteLlmGateway();
 
   const outputMode = options.outputMode ?? "local-wiki";
@@ -79,14 +82,34 @@ export async function runPersonalizedOpenWikiAgent(
   const language = options.language ?? PERSONAL_DEFAULT_LANGUAGE;
 
   if (mode === "personal" && command !== "chat") {
-    return runPersonalBatchPipeline(command, cwd, {
-      ...options,
-      language,
-      outputMode: "local-wiki",
-    });
+    return runPersonalBatchPipeline(
+      command,
+      cwd,
+      {
+        ...options,
+        language,
+        outputMode: "local-wiki",
+      },
+      {
+        runAgent: (innerCommand, innerCwd, innerOptions) =>
+          runOpenWikiAgent(
+            innerCommand,
+            innerCwd,
+            innerOptions,
+            telemetryContext,
+          ),
+      },
+    );
   }
 
-  return runCodeOrChatWorkflow(command, cwd, options, mode, language);
+  return runCodeOrChatWorkflow(
+    command,
+    cwd,
+    options,
+    mode,
+    language,
+    telemetryContext,
+  );
 }
 
 async function runCodeOrChatWorkflow(
@@ -95,6 +118,7 @@ async function runCodeOrChatWorkflow(
   options: OpenWikiRunOptions,
   mode: PersonalWorkflowMode,
   language: string,
+  telemetryContext: RunTelemetryContext,
 ): Promise<OpenWikiRunResult> {
   const outputMode = options.outputMode ?? "local-wiki";
   const snapshotBefore =
@@ -146,15 +170,20 @@ async function runCodeOrChatWorkflow(
     evidenceMessage,
   );
   const evidenceReads = createEvidenceReadTracker(history.batches);
-  const result = await runOpenWikiAgent(command, cwd, {
-    ...options,
-    language,
-    onEvent: (event) => {
-      evidenceReads.onEvent(event);
-      options.onEvent?.(event);
+  const result = await runOpenWikiAgent(
+    command,
+    cwd,
+    {
+      ...options,
+      language,
+      onEvent: (event) => {
+        evidenceReads.onEvent(event);
+        options.onEvent?.(event);
+      },
+      userMessage,
     },
-    userMessage,
-  });
+    telemetryContext,
+  );
 
   if (mode === "code" && command !== "chat") {
     // Rebuild after generation in case the agent touched related navigation.
@@ -541,6 +570,7 @@ export async function runPersonalBatchPipeline(
       // objective from expanding one candidate into unrelated boilerplate pages.
       lastResult = await runAgent("update", cwd, {
         ...options,
+        connectorToolProfile: "none",
         isFollowup: false,
         suppressRunMetadata: true,
         threadId: batchThreadId(options.threadId, batch),
@@ -659,6 +689,7 @@ async function runFallbackReview(
   try {
     const result = await runAgent("update", cwd, {
       ...options,
+      connectorToolProfile: "none",
       isFollowup: false,
       language,
       modelId,

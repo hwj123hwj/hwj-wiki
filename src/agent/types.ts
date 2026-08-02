@@ -38,6 +38,8 @@ export type OpenWikiRunEvent =
     };
 
 export type OpenWikiRunOptions = {
+  /** Internal adapter override; upstream/default runs retain all connectors. */
+  connectorToolProfile?: "all" | "none" | "personal-history";
   debug?: boolean;
   isFollowup?: boolean;
   language?: string | null;
