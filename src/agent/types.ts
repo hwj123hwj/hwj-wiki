@@ -2,9 +2,15 @@ export type OpenWikiCommand = "chat" | "init" | "update";
 export type OpenWikiOutputMode = "local-wiki" | "repository";
 
 export type OpenWikiRunResult = {
+  backlogBatchCount?: number;
+  blockedSourceCount?: number;
   command: OpenWikiCommand;
   model: string;
+  pendingReviewCount?: number;
+  processedBatchCount?: number;
+  reviewBatchCount?: number;
   skipped?: boolean;
+  status?: UpdateRunStatus;
 };
 
 export type OpenWikiRunEvent =
@@ -41,9 +47,11 @@ export type OpenWikiRunOptions = {
   threadId?: string;
   userMessage?: string | null;
   telemetryFile?: string;
+  /** Personalization adapter owns partial/complete metadata for inner runs. */
+  suppressRunMetadata?: boolean;
 };
 
-export type UpdateRunStatus = "complete" | "interrupted";
+export type UpdateRunStatus = "complete" | "interrupted" | "partial";
 
 export type UpdateMetadata = {
   updatedAt: string;

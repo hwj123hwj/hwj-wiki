@@ -85,7 +85,11 @@ import {
   OPENWIKI_VERSION,
   type OpenWikiProvider,
 } from "./constants.js";
-import type { OpenWikiCommand, OpenWikiOutputMode } from "./agent/types.js";
+import type {
+  OpenWikiCommand,
+  OpenWikiOutputMode,
+  UpdateRunStatus,
+} from "./agent/types.js";
 import {
   firstRunNoticePending,
   FIRST_RUN_NOTICE_BODY,
@@ -722,7 +726,7 @@ function App({ command }: AppProps) {
     }
 
     if (runState.status === "success" && autoExitOnSuccess) {
-      process.exitCode = 0;
+      process.exitCode = runState.result.status === "partial" ? 2 : 0;
       app.exit();
       return;
     }
@@ -939,6 +943,7 @@ function App({ command }: AppProps) {
           log={runState.log}
           message={activeUserMessage}
           modelId={runState.result.model}
+          resultStatus={runState.result.status}
         />
       );
     }
@@ -1370,6 +1375,7 @@ type RunViewProps = {
   done?: boolean;
   message?: string | null;
   modelId?: string | null;
+  resultStatus?: UpdateRunStatus;
 };
 
 function RunView({
@@ -1379,10 +1385,12 @@ function RunView({
   done = false,
   message = null,
   modelId = null,
+  resultStatus = "complete",
 }: RunViewProps) {
   const [animationFrame, setAnimationFrame] = useState(0);
   const activeRunningToolId = getActiveRunningToolLogId(log);
   const hasRunningTool = activeRunningToolId !== null;
+  const partial = done && resultStatus === "partial";
 
   useEffect(() => {
     if (done || !hasRunningTool) {
@@ -1404,13 +1412,17 @@ function RunView({
         compact
         modelId={modelId}
         showLogo={false}
-        subtitle={done ? "Run complete" : "Agent running"}
+        subtitle={
+          partial ? "Run partial" : done ? "Run complete" : "Agent running"
+        }
       />
       {message ? <PromptBlock message={message} /> : null}
       <Box flexDirection="column" marginBottom={1}>
         <Text>
-          <Text color={done ? "green" : "cyan"}>* </Text>
-          <Text bold>{done ? "Complete" : "Working"}</Text>{" "}
+          <Text color={partial ? "yellow" : done ? "green" : "cyan"}>* </Text>
+          <Text bold color={partial ? "yellow" : undefined}>
+            {partial ? "Partial" : done ? "Complete" : "Working"}
+          </Text>{" "}
           <Text color="gray">openwiki {command}</Text>
           {!done ? <Text color="gray"> - streaming</Text> : null}
         </Text>
@@ -1719,8 +1731,15 @@ function ChatHistory({ runs }: { runs: CompletedRun[] }) {
         <Box flexDirection="column" key={run.id} marginBottom={1}>
           {run.message ? <PromptBlock message={run.message} /> : null}
           <Text>
-            <Text color="green">* </Text>
-            <Text bold>Complete</Text>{" "}
+            <Text color={run.result.status === "partial" ? "yellow" : "green"}>
+              *{" "}
+            </Text>
+            <Text
+              bold
+              color={run.result.status === "partial" ? "yellow" : undefined}
+            >
+              {run.result.status === "partial" ? "Partial" : "Complete"}
+            </Text>{" "}
             <Text color="gray">
               openwiki {run.command} - {run.result.model}
             </Text>
@@ -4175,17 +4194,21 @@ async function runPrintCommand(
           )
         : command.userMessage;
 
-    await runPersonalizedOpenWikiAgent(command.command, runtimeCwd, {
-      debug: isDebugMode(),
-      isFollowup: command.command === "chat",
-      language: command.language,
-      modelId: command.modelId,
-      outputMode: runtimeOutputMode,
-      threadId: createOpenWikiThreadId(runtimeCwd),
-      userMessage,
-      telemetryFile: command.telemetryFile ?? undefined,
-      onEvent: handlePrintEvent,
-    });
+    const result = await runPersonalizedOpenWikiAgent(
+      command.command,
+      runtimeCwd,
+      {
+        debug: isDebugMode(),
+        isFollowup: command.command === "chat",
+        language: command.language,
+        modelId: command.modelId,
+        outputMode: runtimeOutputMode,
+        threadId: createOpenWikiThreadId(runtimeCwd),
+        userMessage,
+        telemetryFile: command.telemetryFile ?? undefined,
+        onEvent: handlePrintEvent,
+      },
+    );
 
     const text = output.join("").trim();
 
@@ -4193,7 +4216,7 @@ async function runPrintCommand(
       process.stdout.write(`${text}\n`);
     }
 
-    process.exitCode = 0;
+    process.exitCode = result.status === "partial" ? 2 : 0;
   } catch (error) {
     const message = getErrorMessage(error);
     process.stderr.write(`${message}\n`);

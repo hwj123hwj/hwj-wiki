@@ -439,22 +439,26 @@ async function runOpenWikiAgentCore(
     // as interrupted so the next update is not skipped as a no-op against a
     // possibly partial wiki. Persistence errors are swallowed here so the
     // original run error propagates.
-    try {
-      const metadataWritten = await persistRunMetadataIfChanged(
-        command,
-        cwd,
-        modelId,
-        outputMode,
-        openWikiSnapshotBefore,
-        "interrupted",
-        context.language,
-      );
-      emitDebug(
-        options,
-        metadataWritten ? "metadata=written" : "metadata=skipped",
-      );
-    } catch {
-      emitDebug(options, "metadata=writeFailed");
+    if (options.suppressRunMetadata) {
+      emitDebug(options, "metadata=suppressed");
+    } else {
+      try {
+        const metadataWritten = await persistRunMetadataIfChanged(
+          command,
+          cwd,
+          modelId,
+          outputMode,
+          openWikiSnapshotBefore,
+          "interrupted",
+          context.language,
+        );
+        emitDebug(
+          options,
+          metadataWritten ? "metadata=written" : "metadata=skipped",
+        );
+      } catch {
+        emitDebug(options, "metadata=writeFailed");
+      }
     }
 
     throw error;
@@ -473,24 +477,28 @@ async function runOpenWikiAgentCore(
 
   await cleanupTemporaryPlanFile(command, cwd, outputMode, options);
 
-  const metadataWritten = await persistRunMetadataIfChanged(
-    command,
-    cwd,
-    modelId,
-    outputMode,
-    openWikiSnapshotBefore,
-    "complete",
-    context.language,
-  );
+  const metadataWritten = options.suppressRunMetadata
+    ? false
+    : await persistRunMetadataIfChanged(
+        command,
+        cwd,
+        modelId,
+        outputMode,
+        openWikiSnapshotBefore,
+        "complete",
+        context.language,
+      );
 
   if (metadataWritten) {
     emitDebug(options, "metadata=written");
   } else {
     emitDebug(
       options,
-      command === "chat"
-        ? "metadata=skipped command=chat"
-        : "metadata=skipped openwiki=unchanged",
+      options.suppressRunMetadata
+        ? "metadata=suppressed"
+        : command === "chat"
+          ? "metadata=skipped command=chat"
+          : "metadata=skipped openwiki=unchanged",
     );
   }
 
