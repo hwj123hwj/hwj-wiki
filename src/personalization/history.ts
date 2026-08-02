@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import {
   chmod,
@@ -19,6 +19,7 @@ import {
   ensureConnectorHome,
   getConnectorDir,
   getConnectorRawDir,
+  openWikiConnectorsDir,
 } from "../openwiki-home.js";
 
 const execFileAsync = promisify(execFile);
@@ -27,6 +28,7 @@ const MAX_RAW_BATCH_BYTES = 80_000;
 const MAX_RUN_RECORDS = 100;
 const MAX_RUN_RAW_BYTES = 100_000;
 const MAX_JSONL_SCAN_BYTES = 32 * 1024 * 1024;
+const MAX_JSONL_LINE_BYTES = 8 * 1024 * 1024;
 const PREFIX_SAMPLE_BYTES = 64 * 1024;
 const PRIVATE_FILE_MODE = 0o600;
 const PRIVATE_DIR_MODE = 0o700;
@@ -79,6 +81,8 @@ interface SourceDefinition {
 }
 
 export interface CollectPersonalHistoryOptions {
+  /** Test override for the bounded JSONL scan window. */
+  maxJsonlScanBytes?: number;
   /** Test/advanced override for source roots. */
   roots?: Partial<Record<PersonalHistorySource, string>>;
   /** Test override; production uses ~/.openwiki/connectors. */
@@ -87,9 +91,12 @@ export interface CollectPersonalHistoryOptions {
 
 export interface PersonalHistoryCollection {
   backlogBatchCount: number;
+  backlogBySource: Partial<Record<PersonalHistorySource, number>>;
   batches: PersonalHistoryBatch[];
   rawFiles: string[];
   recordCount: number;
+  scanBlockedSources: PersonalHistorySource[];
+  scanPendingSources: PersonalHistorySource[];
   scopeKey: string;
   sources: PersonalHistorySource[];
   warnings: string[];
@@ -106,6 +113,11 @@ export interface PersonalHistoryBatch {
 
 interface ProcessingReceipt {
   processed: string[];
+  version: 1;
+}
+
+interface SchedulerState {
+  nextConnectorIndex: number;
   version: 1;
 }
 
@@ -142,27 +154,69 @@ export async function collectPersonalHistory(
       pending,
       warnings,
       options.stateRoot,
+      [],
+      [],
     );
   }
 
-  let remainingRecords = MAX_RUN_RECORDS;
+  const scanBlockedSources: PersonalHistorySource[] = [];
+  const scanPendingSources: PersonalHistorySource[] = [];
 
-  for (const definition of definitions) {
-    if (remainingRecords <= 0) break;
-    const result = await collectSource(
-      definition,
-      mode,
-      canonicalRepoRoot,
-      scopeKey,
-      options.stateRoot,
-      remainingRecords,
+  if (mode === "personal") {
+    const scheduler = await readSchedulerState(scopeKey, options.stateRoot);
+    const orderedDefinitions = rotateDefinitions(
+      definitions,
+      scheduler.nextConnectorIndex,
     );
-    warnings.push(...result.warnings);
-    remainingRecords -= result.records.length;
+
+    // Each personal source gets its own bounded scan window. Pending selection
+    // still returns one raw batch, so Agent context remains bounded while a
+    // large Pi or Codex archive cannot prevent other sources being discovered.
+    for (const definition of orderedDefinitions) {
+      const result = await collectSource(
+        definition,
+        mode,
+        canonicalRepoRoot,
+        scopeKey,
+        options.stateRoot,
+        MAX_RUN_RECORDS,
+        options.maxJsonlScanBytes,
+      );
+      warnings.push(...result.warnings);
+      if (result.scanBlocked) scanBlockedSources.push(definition.source);
+      if (result.scanPending) scanPendingSources.push(definition.source);
+    }
+  } else {
+    // Preserve code mode's original shared per-run record budget and source
+    // order. Personal backlog orchestration must not change repository docs.
+    let remainingRecords = MAX_RUN_RECORDS;
+    for (const definition of definitions) {
+      if (remainingRecords <= 0) break;
+      const result = await collectSource(
+        definition,
+        mode,
+        canonicalRepoRoot,
+        scopeKey,
+        options.stateRoot,
+        remainingRecords,
+        options.maxJsonlScanBytes,
+      );
+      warnings.push(...result.warnings);
+      if (result.scanBlocked) scanBlockedSources.push(definition.source);
+      if (result.scanPending) scanPendingSources.push(definition.source);
+      remainingRecords -= result.records.length;
+    }
   }
 
   pending = await selectPendingBatches(scopeKey, mode, options.stateRoot);
-  return collectionFromPending(scopeKey, pending, warnings, options.stateRoot);
+  return collectionFromPending(
+    scopeKey,
+    pending,
+    warnings,
+    options.stateRoot,
+    scanPendingSources,
+    scanBlockedSources,
+  );
 }
 
 export async function acknowledgePersonalHistoryBatches(
@@ -188,16 +242,39 @@ export async function acknowledgePersonalHistoryBatches(
       version: 1,
     } satisfies ProcessingReceipt);
   }
+
+  const lastBatch = collection.batches.at(-1);
+  if (lastBatch && collection.scopeKey === "personal") {
+    const connectorIndex = PERSONAL_HISTORY_CONNECTOR_IDS.indexOf(
+      lastBatch.connectorId,
+    );
+    await writeSchedulerState(
+      collection.scopeKey,
+      {
+        nextConnectorIndex:
+          (connectorIndex + 1) % PERSONAL_HISTORY_CONNECTOR_IDS.length,
+        version: 1,
+      },
+      stateRoot,
+    );
+  }
 }
 
 function collectionFromPending(
   scopeKey: string,
-  pending: { backlogBatchCount: number; batches: PersonalHistoryBatch[] },
+  pending: {
+    backlogBatchCount: number;
+    backlogBySource: Partial<Record<PersonalHistorySource, number>>;
+    batches: PersonalHistoryBatch[];
+  },
   warnings: string[],
   stateRoot?: string,
+  scanPendingSources: PersonalHistorySource[] = [],
+  scanBlockedSources: PersonalHistorySource[] = [],
 ): PersonalHistoryCollection {
   return {
     backlogBatchCount: pending.backlogBatchCount,
+    backlogBySource: pending.backlogBySource,
     batches: pending.batches,
     rawFiles: pending.batches.map((batch) =>
       path.join(
@@ -211,6 +288,8 @@ function collectionFromPending(
       (total, batch) => total + batch.recordCount,
       0,
     ),
+    scanBlockedSources: [...new Set(scanBlockedSources)],
+    scanPendingSources: [...new Set(scanPendingSources)],
     scopeKey,
     sources: [...new Set(pending.batches.map((batch) => batch.source))],
     warnings,
@@ -224,13 +303,22 @@ async function collectSource(
   scopeKey: string,
   stateRoot?: string,
   maxRecords = MAX_RUN_RECORDS,
+  maxJsonlScanBytes = MAX_JSONL_SCAN_BYTES,
 ): Promise<{
   rawFiles: string[];
   records: PersonalHistoryRecord[];
+  scanBlocked: boolean;
+  scanPending: boolean;
   warnings: string[];
 }> {
   if (!(await isDirectory(definition.root))) {
-    return { rawFiles: [], records: [], warnings: [] };
+    return {
+      rawFiles: [],
+      records: [],
+      scanBlocked: false,
+      scanPending: false,
+      warnings: [],
+    };
   }
 
   const storage = await resolveStorage(definition.connectorId, stateRoot);
@@ -239,10 +327,15 @@ async function collectSource(
   const nextState: HistoryState = { files: { ...state.files }, version: 1 };
   const files = await listSourceFiles(definition.root, definition);
   const records: PersonalHistoryRecord[] = [];
+  let scanBlocked = false;
+  let scanPending = false;
   const warnings: string[] = [];
 
-  for (const filePath of files) {
-    if (records.length >= maxRecords) break;
+  for (const [fileIndex, filePath] of files.entries()) {
+    if (records.length >= maxRecords) {
+      scanPending ||= fileIndex < files.length;
+      break;
+    }
     const relativePath = path
       .relative(definition.root, filePath)
       .split(path.sep)
@@ -258,6 +351,7 @@ async function collectSource(
               mode,
               repoRoot,
               maxRecords - records.length,
+              maxJsonlScanBytes,
             )
           : await collectDoubaoFile(
               filePath,
@@ -267,8 +361,10 @@ async function collectSource(
             );
       records.push(...result.records);
       nextState.files[relativePath] = result.state;
+      scanPending ||= result.hasMoreInput;
       warnings.push(...result.warnings);
     } catch (error) {
+      scanBlocked = true;
       warnings.push(
         `${definition.source}:${relativePath}: ${error instanceof Error ? error.message : String(error)}`,
       );
@@ -277,7 +373,7 @@ async function collectSource(
 
   const rawFiles: string[] = [];
   if (records.length > 0) {
-    const runId = new Date().toISOString().replace(/[:.]/gu, "-");
+    const runId = `${new Date().toISOString().replace(/[:.]/gu, "-")}-${randomUUID().slice(0, 8)}`;
     const runDir = path.join(storage.rawDir, runId);
     await mkdir(runDir, { recursive: true, mode: PRIVATE_DIR_MODE });
     const batches = splitRecordBatches(records);
@@ -301,7 +397,7 @@ async function collectSource(
 
   // Advance cursors only after the sanitized raw batch is durable.
   await writePrivateJsonAtomic(statePath, nextState);
-  return { rawFiles, records, warnings };
+  return { rawFiles, records, scanBlocked, scanPending, warnings };
 }
 
 function splitRecordBatches(
@@ -333,7 +429,11 @@ async function selectPendingBatches(
   scopeKey: string,
   mode: PersonalWorkflowMode,
   stateRoot?: string,
-): Promise<{ backlogBatchCount: number; batches: PersonalHistoryBatch[] }> {
+): Promise<{
+  backlogBatchCount: number;
+  backlogBySource: Partial<Record<PersonalHistorySource, number>>;
+  batches: PersonalHistoryBatch[];
+}> {
   const pending: PersonalHistoryBatch[] = [];
 
   for (const connectorId of PERSONAL_HISTORY_CONNECTOR_IDS) {
@@ -380,6 +480,40 @@ async function selectPendingBatches(
       `${right.path}\0${right.connectorId}`,
     ),
   );
+  const backlogBySource: Partial<Record<PersonalHistorySource, number>> = {};
+  for (const batch of pending) {
+    backlogBySource[batch.source] = (backlogBySource[batch.source] ?? 0) + 1;
+  }
+
+  const selected =
+    mode === "personal"
+      ? selectFairPersonalBatch(
+          pending,
+          await readSchedulerState(scopeKey, stateRoot),
+        )
+      : selectCodeBatches(pending);
+
+  return {
+    backlogBatchCount: pending.length,
+    backlogBySource,
+    batches: Array.isArray(selected) ? selected : selected ? [selected] : [],
+  };
+}
+
+function selectFairPersonalBatch(
+  pending: PersonalHistoryBatch[],
+  scheduler: SchedulerState,
+): PersonalHistoryBatch | undefined {
+  return rotateConnectors(scheduler.nextConnectorIndex)
+    .map((connectorId) =>
+      pending.find((batch) => batch.connectorId === connectorId),
+    )
+    .find((batch): batch is PersonalHistoryBatch => batch !== undefined);
+}
+
+function selectCodeBatches(
+  pending: PersonalHistoryBatch[],
+): PersonalHistoryBatch[] {
   const selected: PersonalHistoryBatch[] = [];
   let selectedBytes = 0;
   let selectedRecords = 0;
@@ -395,8 +529,82 @@ async function selectPendingBatches(
     selectedBytes += batch.byteSize;
     selectedRecords += batch.recordCount;
   }
+  return selected;
+}
 
-  return { backlogBatchCount: pending.length, batches: selected };
+function rotateDefinitions(
+  definitions: SourceDefinition[],
+  nextConnectorIndex: number,
+): SourceDefinition[] {
+  const order = rotateConnectors(nextConnectorIndex);
+  return [...definitions].sort(
+    (left, right) =>
+      order.indexOf(left.connectorId) - order.indexOf(right.connectorId),
+  );
+}
+
+function rotateConnectors(
+  nextConnectorIndex: number,
+): PersonalHistoryConnectorId[] {
+  const normalized =
+    ((nextConnectorIndex % PERSONAL_HISTORY_CONNECTOR_IDS.length) +
+      PERSONAL_HISTORY_CONNECTOR_IDS.length) %
+    PERSONAL_HISTORY_CONNECTOR_IDS.length;
+  return [
+    ...PERSONAL_HISTORY_CONNECTOR_IDS.slice(normalized),
+    ...PERSONAL_HISTORY_CONNECTOR_IDS.slice(0, normalized),
+  ];
+}
+
+async function readSchedulerState(
+  scopeKey: string,
+  stateRoot?: string,
+): Promise<SchedulerState> {
+  try {
+    const parsed = JSON.parse(
+      await readFile(
+        path.join(
+          await coordinatorDir(stateRoot),
+          `scheduler-${scopeKey}.json`,
+        ),
+        "utf8",
+      ),
+    ) as unknown;
+    if (
+      isRecord(parsed) &&
+      parsed.version === 1 &&
+      typeof parsed.nextConnectorIndex === "number" &&
+      Number.isInteger(parsed.nextConnectorIndex)
+    ) {
+      return {
+        nextConnectorIndex: parsed.nextConnectorIndex,
+        version: 1,
+      };
+    }
+  } catch (error) {
+    if (!isFileNotFoundError(error)) throw error;
+  }
+  return { nextConnectorIndex: 0, version: 1 };
+}
+
+async function writeSchedulerState(
+  scopeKey: string,
+  state: SchedulerState,
+  stateRoot?: string,
+): Promise<void> {
+  await writePrivateJsonAtomic(
+    path.join(await coordinatorDir(stateRoot), `scheduler-${scopeKey}.json`),
+    state,
+  );
+}
+
+async function coordinatorDir(stateRoot?: string): Promise<string> {
+  const directory = path.join(
+    stateRoot ?? openWikiConnectorsDir,
+    ".personalization",
+  );
+  await mkdir(directory, { recursive: true, mode: PRIVATE_DIR_MODE });
+  return directory;
 }
 
 async function listRawBatchFiles(
@@ -521,7 +729,9 @@ async function collectJsonlFile(
   mode: PersonalWorkflowMode,
   repoRoot: string,
   maxRecords: number,
+  maxJsonlScanBytes: number,
 ): Promise<{
+  hasMoreInput: boolean;
   records: PersonalHistoryRecord[];
   state: FileState;
   warnings: string[];
@@ -532,7 +742,11 @@ async function collectJsonlFile(
     fileStat.size,
     previous,
   );
-  const window = await readJsonlWindow(filePath, startOffset);
+  const window = await readJsonlWindow(
+    filePath,
+    startOffset,
+    maxJsonlScanBytes,
+  );
   const parsedEvents = window.lines.map((line) => line.event);
   const belongs =
     mode === "personal" ||
@@ -544,17 +758,22 @@ async function collectJsonlFile(
     sha256(relativePath).slice(0, 16);
   const records: PersonalHistoryRecord[] = [];
   let processedOffset = startOffset;
+  let stoppedForRecordLimit = false;
 
   for (const [index, line] of window.lines.entries()) {
     const record = belongs
       ? normalizeJsonlEvent(source, sessionId, line.event, startOffset, index)
       : undefined;
     if (record) {
-      if (records.length >= maxRecords) break;
+      if (records.length >= maxRecords) {
+        stoppedForRecordLimit = true;
+        break;
+      }
       records.push(record);
     }
     processedOffset = line.endOffset;
   }
+  if (!stoppedForRecordLimit) processedOffset = window.scanEndOffset;
 
   const warnings =
     window.invalidLineCount > 0
@@ -566,6 +785,7 @@ async function collectJsonlFile(
   const headHash = await hashFileHead(filePath, fileStat.size, headBytes);
 
   return {
+    hasMoreInput: processedOffset < fileStat.size,
     records,
     state: {
       belongsToRepository: belongs,
@@ -583,9 +803,11 @@ async function collectJsonlFile(
 async function readJsonlWindow(
   filePath: string,
   startOffset: number,
+  maxScanBytes: number,
 ): Promise<{
   invalidLineCount: number;
   lines: Array<{ endOffset: number; event: unknown }>;
+  scanEndOffset: number;
 }> {
   const fileHandle = await open(filePath, "r");
   const stream = fileHandle.createReadStream({
@@ -597,6 +819,7 @@ async function readJsonlWindow(
   let buffer = Buffer.alloc(0);
   let consumed = 0;
   let invalidLineCount = 0;
+  let stoppedAtLimit = false;
 
   try {
     for await (const chunk of stream) {
@@ -615,20 +838,53 @@ async function readJsonlWindow(
             invalidLineCount += 1;
           }
         }
-        if (consumed >= MAX_JSONL_SCAN_BYTES) {
+        if (consumed >= maxScanBytes) {
+          stoppedAtLimit = true;
           stream.destroy();
           break;
         }
         newlineIndex = buffer.indexOf(0x0a);
       }
-      if (consumed >= MAX_JSONL_SCAN_BYTES) break;
+      if (stoppedAtLimit) break;
+      if (buffer.length > MAX_JSONL_LINE_BYTES) {
+        // A single enormous JSONL entry must not make a multi-gigabyte file
+        // exceed Node's Buffer limits. Advance over this private raw fragment;
+        // the following scan will discard the remainder up to its newline.
+        consumed += buffer.length;
+        buffer = Buffer.alloc(0);
+        invalidLineCount += 1;
+        stoppedAtLimit = consumed >= maxScanBytes;
+        if (stoppedAtLimit) {
+          stream.destroy();
+          break;
+        }
+      }
+    }
+
+    if (!stoppedAtLimit && buffer.length > 0) {
+      consumed += buffer.length;
+      const text = buffer.toString("utf8").trim();
+      if (text) {
+        try {
+          lines.push({
+            endOffset: startOffset + consumed,
+            event: JSON.parse(text) as unknown,
+          });
+        } catch {
+          invalidLineCount += 1;
+        }
+      }
     }
   } finally {
     stream.destroy();
     await fileHandle.close();
   }
 
-  return { invalidLineCount, lines };
+  return {
+    invalidLineCount,
+    lines,
+    scanEndOffset: startOffset + consumed,
+  };
 }
 
 async function collectDoubaoFile(
@@ -637,6 +893,7 @@ async function collectDoubaoFile(
   previous: FileState | undefined,
   maxRecords: number,
 ): Promise<{
+  hasMoreInput: boolean;
   records: PersonalHistoryRecord[];
   state: FileState;
   warnings: string[];
@@ -654,13 +911,19 @@ async function collectDoubaoFile(
     previous.prefixHash === digest &&
     previous.itemOffset === undefined
   ) {
-    return { records: [], state: nextState, warnings: [] };
+    return {
+      hasMoreInput: false,
+      records: [],
+      state: nextState,
+      warnings: [],
+    };
   }
 
   const sessionId = `doubao-${sha256(relativePath).slice(0, 16)}`;
   if (/\.md$/iu.test(filePath)) {
     const text = sanitizeImportedText(bytes.toString("utf8"));
     return {
+      hasMoreInput: false,
       records: text
         ? [
             createRecord(
@@ -682,6 +945,7 @@ async function collectDoubaoFile(
     parsed = JSON.parse(bytes.toString("utf8")) as unknown;
   } catch {
     return {
+      hasMoreInput: false,
       records: [],
       state: nextState,
       warnings: [`${relativePath}: invalid JSON skipped`],
@@ -723,6 +987,7 @@ async function collectDoubaoFile(
   }
 
   return {
+    hasMoreInput: nextIndex < messages.length,
     records,
     state: {
       ...nextState,

@@ -129,6 +129,9 @@ export async function getUpdateNoopStatus(
   if (lastUpdate.status === "interrupted") {
     return { shouldSkip: false, reason: "previous update was interrupted" };
   }
+  if (lastUpdate.status === "partial") {
+    return { shouldSkip: false, reason: "previous update was partial" };
+  }
 
   const head = await getGitHead(cwd);
 
@@ -235,7 +238,10 @@ export async function persistRunMetadataIfChanged(
     // A completed run clears a previous interrupted status even when the
     // content did not change, so the update no-op check can skip again.
     const lastUpdate = await readLastUpdate(cwd, outputMode);
-    if (status !== "complete" || lastUpdate?.status !== "interrupted") {
+    if (
+      status !== "complete" ||
+      (lastUpdate?.status !== "interrupted" && lastUpdate?.status !== "partial")
+    ) {
       return false;
     }
   }
@@ -317,7 +323,10 @@ async function readLastUpdate(
         // Metadata written before the status field existed is treated as
         // complete so upgrades do not force a spurious re-run.
         status:
-          parsedMetadata.status === "interrupted" ? "interrupted" : "complete",
+          parsedMetadata.status === "interrupted" ||
+          parsedMetadata.status === "partial"
+            ? parsedMetadata.status
+            : "complete",
         language:
           typeof parsedMetadata.language === "string"
             ? parsedMetadata.language

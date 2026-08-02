@@ -1,5 +1,17 @@
-import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import {
+  cp,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import type {
   OpenWikiCommand,
   OpenWikiRunEvent,
@@ -10,8 +22,24 @@ import {
   createOpenWikiContentSnapshot,
   persistRunMetadataIfChanged,
 } from "../agent/utils.js";
-import { runOpenWikiAgent } from "../agent/index.js";
+import { resolveModelId, runOpenWikiAgent } from "../agent/index.js";
+import { resolveConfiguredProvider } from "../constants.js";
 import { loadOpenWikiEnv } from "../env.js";
+import type { RunTelemetryContext } from "../telemetry/index.js";
+import {
+  acknowledgeCandidateReview,
+  type CandidateReviewTask,
+  extractKnowledgeCandidates,
+  listCandidateReviews,
+  markCandidateCheckpointForReview,
+  type CandidateBatchCheckpoint,
+  type KnowledgeCandidate,
+} from "./candidates.js";
+import {
+  capturePersonalWikiBodySnapshot,
+  finalizePersonalWiki,
+  type PersonalFinalizeReport,
+} from "./finalize.js";
 import {
   acknowledgePersonalHistoryBatches,
   collectPersonalHistory,
@@ -20,7 +48,11 @@ import {
   type PersonalWorkflowMode,
 } from "./history.js";
 import { generateProjectIssuesIndex } from "./issues-index.js";
-import { generatePersonalWikiFallback } from "./fallback.js";
+import {
+  generatePersonalWikiFallback,
+  type PersonalFallbackResult,
+} from "./fallback.js";
+import { createCandidateMergeMessage } from "./merge.js";
 import {
   applyPersonalWorkflowEnvironmentDefaults,
   PERSONAL_DEFAULT_LANGUAGE,
@@ -37,15 +69,58 @@ export async function runPersonalizedOpenWikiAgent(
   command: OpenWikiCommand,
   cwd: string,
   options: OpenWikiRunOptions = {},
+  telemetryContext: RunTelemetryContext = {},
 ): Promise<OpenWikiRunResult> {
   await loadOpenWikiEnv();
   applyPersonalWorkflowEnvironmentDefaults();
+  telemetryContext.provider = resolveConfiguredProvider();
   await verifyPersonalLiteLlmGateway();
 
   const outputMode = options.outputMode ?? "local-wiki";
   const mode: PersonalWorkflowMode =
     outputMode === "repository" ? "code" : "personal";
   const language = options.language ?? PERSONAL_DEFAULT_LANGUAGE;
+
+  if (mode === "personal" && command !== "chat") {
+    return runPersonalBatchPipeline(
+      command,
+      cwd,
+      {
+        ...options,
+        language,
+        outputMode: "local-wiki",
+      },
+      {
+        runAgent: (innerCommand, innerCwd, innerOptions) =>
+          runOpenWikiAgent(
+            innerCommand,
+            innerCwd,
+            innerOptions,
+            telemetryContext,
+          ),
+      },
+    );
+  }
+
+  return runCodeOrChatWorkflow(
+    command,
+    cwd,
+    options,
+    mode,
+    language,
+    telemetryContext,
+  );
+}
+
+async function runCodeOrChatWorkflow(
+  command: OpenWikiCommand,
+  cwd: string,
+  options: OpenWikiRunOptions,
+  mode: PersonalWorkflowMode,
+  language: string,
+  telemetryContext: RunTelemetryContext,
+): Promise<OpenWikiRunResult> {
+  const outputMode = options.outputMode ?? "local-wiki";
   const snapshotBefore =
     command === "chat"
       ? null
@@ -95,15 +170,20 @@ export async function runPersonalizedOpenWikiAgent(
     evidenceMessage,
   );
   const evidenceReads = createEvidenceReadTracker(history.batches);
-  const result = await runOpenWikiAgent(command, cwd, {
-    ...options,
-    language,
-    onEvent: (event) => {
-      evidenceReads.onEvent(event);
-      options.onEvent?.(event);
+  const result = await runOpenWikiAgent(
+    command,
+    cwd,
+    {
+      ...options,
+      language,
+      onEvent: (event) => {
+        evidenceReads.onEvent(event);
+        options.onEvent?.(event);
+      },
+      userMessage,
     },
-    userMessage,
-  });
+    telemetryContext,
+  );
 
   if (mode === "code" && command !== "chat") {
     // Rebuild after generation in case the agent touched related navigation.
@@ -113,7 +193,7 @@ export async function runPersonalizedOpenWikiAgent(
 
   if (command !== "chat") {
     const snapshotAfter = await createOpenWikiContentSnapshot(cwd, outputMode);
-    let validation = await validatePersonalizedWikiOutput(
+    const validation = await validatePersonalizedWikiOutput(
       command,
       cwd,
       outputMode,
@@ -122,41 +202,6 @@ export async function runPersonalizedOpenWikiAgent(
       history.batches.length > 0,
       evidenceReads.allRead(),
     );
-    if (
-      !validation.valid &&
-      mode === "personal" &&
-      history.batches.length > 0
-    ) {
-      options.onEvent?.({
-        source: "main",
-        text: "Agent 未能执行工具调用，正在使用个人历史安全降级生成。\n",
-        type: "text",
-      });
-      const fallback = await generatePersonalWikiFallback(
-        cwd,
-        history.batches,
-        result.model,
-        language,
-      );
-      options.onEvent?.({
-        source: "main",
-        text: `安全降级已生成 ${fallback.files.length} 个 Wiki 页面${fallback.truncated ? "（证据已按上限截断）" : ""}。\n`,
-        type: "text",
-      });
-      const fallbackSnapshot = await createOpenWikiContentSnapshot(
-        cwd,
-        outputMode,
-      );
-      validation = await validatePersonalizedWikiOutput(
-        command,
-        cwd,
-        outputMode,
-        snapshotBefore,
-        fallbackSnapshot,
-        true,
-        true,
-      );
-    }
     if (!validation.valid) {
       await markPersonalizedRunInterrupted(
         command,
@@ -185,6 +230,750 @@ export async function runPersonalizedOpenWikiAgent(
   }
 
   return result;
+}
+
+export interface PersonalPipelineDependencies {
+  acknowledgeReview?: typeof acknowledgeCandidateReview;
+  acknowledge?: typeof acknowledgePersonalHistoryBatches;
+  collect?: typeof collectPersonalHistory;
+  extract?: (
+    batch: PersonalHistoryBatch,
+    scopeKey: string,
+    modelId: string,
+    language: string,
+  ) => Promise<CandidateBatchCheckpoint>;
+  fallback?: (
+    wikiRoot: string,
+    candidates: KnowledgeCandidate[],
+    language: string,
+  ) => Promise<PersonalFallbackResult>;
+  finalize?: (
+    wikiRoot: string,
+    options: {
+      baselineBodies?: Record<string, string>;
+      allowFallbackGenerated?: boolean;
+      candidates: KnowledgeCandidate[];
+      language: string;
+      requireCandidateReview?: boolean;
+    },
+  ) => Promise<PersonalFinalizeReport>;
+  listReviews?: typeof listCandidateReviews;
+  markReview?: typeof markCandidateCheckpointForReview;
+  runAgent?: typeof runOpenWikiAgent;
+}
+
+export async function runPersonalBatchPipeline(
+  command: Exclude<OpenWikiCommand, "chat">,
+  cwd: string,
+  options: OpenWikiRunOptions & {
+    language: string;
+    outputMode: "local-wiki";
+  },
+  dependencies: PersonalPipelineDependencies = {},
+): Promise<OpenWikiRunResult> {
+  const acknowledge =
+    dependencies.acknowledge ?? acknowledgePersonalHistoryBatches;
+  const acknowledgeReview =
+    dependencies.acknowledgeReview ?? acknowledgeCandidateReview;
+  const collect = dependencies.collect ?? collectPersonalHistory;
+  const extract = dependencies.extract ?? extractKnowledgeCandidates;
+  const fallbackGenerate =
+    dependencies.fallback ?? generatePersonalWikiFallback;
+  const finalize = dependencies.finalize ?? finalizePersonalWiki;
+  const listReviews = dependencies.listReviews ?? listCandidateReviews;
+  const markReview =
+    dependencies.markReview ?? markCandidateCheckpointForReview;
+  const runAgent = dependencies.runAgent ?? runOpenWikiAgent;
+  const language = options.language;
+  const modelId = resolveModelId(options, resolveConfiguredProvider());
+  const processedBySource: Partial<
+    Record<PersonalHistoryBatch["source"], number>
+  > = {};
+  let processedBatchCount = 0;
+  let reviewedBatchCount = 0;
+  let lastResult: OpenWikiRunResult = { command, model: modelId };
+  const emittedWarnings = new Set<string>();
+  const initialReviews = await listReviews("personal");
+  const initialReviewIds = new Set(initialReviews.map((review) => review.id));
+  const reviewIds = new Set(initialReviewIds);
+  let nativeMergeAvailable = true;
+
+  // Persist partial before touching a batch. The inner upstream runs suppress
+  // their own metadata, closing the crash window where one bounded Agent call
+  // could otherwise claim the entire backlog was complete.
+  await writePersonalRunMetadata(command, cwd, modelId, language, "partial", {
+    backlogBatchCount: 0,
+    backlogBySource: {},
+    pendingReviewCount: reviewIds.size,
+    processedBatchCount,
+    processedBySource,
+    reviewedBatchCount,
+  });
+
+  while (true) {
+    const history = await collect("personal", cwd);
+    emitNewWarnings(history.warnings, emittedWarnings, options);
+
+    if (history.batches.length === 0) {
+      if (history.scanPendingSources.length > 0) {
+        options.onEvent?.({
+          source: "main",
+          text: `当前扫描窗口没有形成知识批次，但 ${history.scanPendingSources.join(", ")} 仍有源文件待扫描，继续读取下一窗口。\n`,
+          type: "text",
+        });
+        continue;
+      }
+      if (history.scanBlockedSources.length > 0) {
+        const outstandingReviews = await listReviews("personal");
+        return finishPersonalRunPartial(
+          command,
+          cwd,
+          modelId,
+          language,
+          lastResult,
+          options,
+          processedBatchCount,
+          processedBySource,
+          reviewedBatchCount,
+          outstandingReviews.length,
+          `以下来源存在无法读取的文件，未将其误报为完成：${history.scanBlockedSources.join(", ")}`,
+          history.scanBlockedSources,
+        );
+      }
+      const outstandingReviews = await listReviews("personal");
+      const review = outstandingReviews.find((item) =>
+        initialReviewIds.has(item.id),
+      );
+      if (review) {
+        if (!nativeMergeAvailable) {
+          return finishPersonalRunPartial(
+            command,
+            cwd,
+            modelId,
+            language,
+            lastResult,
+            options,
+            processedBatchCount,
+            processedBySource,
+            reviewedBatchCount,
+            outstandingReviews.length,
+            "本轮原生 Agent 已失败，降级页面留待下次正常运行复核。",
+          );
+        }
+        const reviewResult = await runFallbackReview(
+          command,
+          cwd,
+          modelId,
+          language,
+          review,
+          options,
+          runAgent,
+          finalize,
+        );
+        if (!reviewResult.valid) {
+          return finishPersonalRunPartial(
+            command,
+            cwd,
+            modelId,
+            language,
+            lastResult,
+            options,
+            processedBatchCount,
+            processedBySource,
+            reviewedBatchCount,
+            outstandingReviews.length,
+            `降级页面复核未通过：${shortError(reviewResult.error)}`,
+          );
+        }
+        lastResult = reviewResult.result;
+        await acknowledgeReview(review);
+        initialReviewIds.delete(review.id);
+        reviewIds.delete(review.id);
+        reviewedBatchCount += 1;
+        await writePersonalRunMetadata(
+          command,
+          cwd,
+          modelId,
+          language,
+          "partial",
+          {
+            backlogBatchCount: 0,
+            backlogBySource: {},
+            pendingReviewCount: Math.max(0, outstandingReviews.length - 1),
+            processedBatchCount,
+            processedBySource,
+            reviewedBatchCount,
+          },
+        );
+        options.onEvent?.({
+          source: "main",
+          text: `降级复核 checkpoint 已确认：本次已复核 ${reviewedBatchCount} 个，剩余 ${Math.max(0, outstandingReviews.length - 1)} 个。\n`,
+          type: "text",
+        });
+        continue;
+      }
+
+      if (outstandingReviews.length > 0) {
+        const partialReport = await finalize(cwd, {
+          allowFallbackGenerated: true,
+          candidates: [],
+          language,
+        });
+        if (!partialReport.valid) {
+          throw qualityError(
+            "降级队列的全局质量检查未通过",
+            partialReport.issues,
+          );
+        }
+        return finishPersonalRunPartial(
+          command,
+          cwd,
+          modelId,
+          language,
+          lastResult,
+          options,
+          processedBatchCount,
+          processedBySource,
+          reviewedBatchCount,
+          outstandingReviews.length,
+          "原始 backlog 已清空，但降级页面仍待正常 Agent 复核。",
+        );
+      }
+
+      const finalReport = await finalize(cwd, {
+        candidates: [],
+        language,
+      });
+      if (!finalReport.valid) {
+        await writePersonalRunMetadata(
+          command,
+          cwd,
+          modelId,
+          language,
+          "partial",
+          {
+            backlogBatchCount: 0,
+            backlogBySource: {},
+            pendingReviewCount: 0,
+            processedBatchCount,
+            processedBySource,
+            reviewedBatchCount,
+          },
+        );
+        throw qualityError("最终质量检查未通过", finalReport.issues);
+      }
+
+      await writePersonalRunMetadata(
+        command,
+        cwd,
+        modelId,
+        language,
+        "complete",
+        {
+          backlogBatchCount: 0,
+          backlogBySource: {},
+          pendingReviewCount: 0,
+          processedBatchCount,
+          processedBySource,
+          reviewedBatchCount,
+        },
+      );
+      options.onEvent?.({
+        source: "main",
+        text: `个人知识整理完成：本次处理 ${processedBatchCount} 个原始批次、复核 ${reviewedBatchCount} 个降级批次，待处理 0 个。\n`,
+        type: "text",
+      });
+      return {
+        ...lastResult,
+        backlogBatchCount: 0,
+        command,
+        pendingReviewCount: 0,
+        processedBatchCount,
+        reviewBatchCount: reviewedBatchCount,
+        status: "complete",
+      };
+    }
+
+    const batch = history.batches[0];
+    if (!batch) continue;
+    await writePersonalRunMetadata(command, cwd, modelId, language, "partial", {
+      backlogBatchCount: history.backlogBatchCount,
+      backlogBySource: history.backlogBySource,
+      pendingReviewCount: reviewIds.size,
+      processedBatchCount,
+      processedBySource,
+      reviewedBatchCount,
+    });
+    options.onEvent?.({
+      source: "main",
+      text: formatBatchStart(batch, history, processedBatchCount),
+      type: "text",
+    });
+
+    const checkpoint = await extract(
+      batch,
+      history.scopeKey,
+      modelId,
+      language,
+    );
+    options.onEvent?.({
+      source: "main",
+      text: `候选提取完成：${checkpoint.candidates.length} 条长期知识候选。\n`,
+      type: "text",
+    });
+
+    if (checkpoint.candidates.length === 0) {
+      const report = await finalize(cwd, {
+        allowFallbackGenerated: true,
+        candidates: [],
+        language,
+      });
+      if (!report.valid) {
+        throw qualityError("空知识批次后的质量检查未通过", report.issues);
+      }
+      await acknowledge(history);
+      processedBatchCount += 1;
+      incrementSource(processedBySource, batch.source);
+      await writeProgressAfterAcknowledgement(
+        command,
+        cwd,
+        modelId,
+        language,
+        history,
+        processedBatchCount,
+        processedBySource,
+        reviewIds.size,
+        reviewedBatchCount,
+      );
+      emitBatchProgress(
+        options,
+        processedBatchCount,
+        history,
+        processedBySource,
+      );
+      continue;
+    }
+
+    const baselineBodies = await capturePersonalWikiBodySnapshot(cwd);
+    const backup = await createWikiBackup(cwd);
+    let nativeFailure: unknown = nativeMergeAvailable
+      ? undefined
+      : new Error("本轮已切换为结构化降级模式。");
+    try {
+      if (!nativeMergeAvailable) throw nativeFailure;
+      const mergeMessage = createCandidateMergeMessage(
+        checkpoint.candidates,
+        language,
+      );
+      // The personal adapter owns initialization and deterministic navigation.
+      // Every bounded candidate pass is an update, preventing the upstream init
+      // objective from expanding one candidate into unrelated boilerplate pages.
+      lastResult = await runAgent("update", cwd, {
+        ...options,
+        connectorToolProfile: "none",
+        isFollowup: false,
+        suppressRunMetadata: true,
+        threadId: batchThreadId(options.threadId, batch),
+        userMessage: joinMessages(
+          processedBatchCount === 0
+            ? (options.userMessage ?? undefined)
+            : undefined,
+          mergeMessage,
+        ),
+      });
+      const report = await finalize(cwd, {
+        allowFallbackGenerated: true,
+        baselineBodies,
+        candidates: checkpoint.candidates,
+        language,
+        requireCandidateReview: true,
+      });
+      if (!report.valid) {
+        throw qualityError("Agent 输出质量检查未通过", report.issues);
+      }
+    } catch (error) {
+      nativeFailure = error;
+    }
+
+    if (nativeFailure === undefined) {
+      await acknowledge(history);
+      await discardWikiBackup(backup);
+      processedBatchCount += 1;
+      incrementSource(processedBySource, batch.source);
+      await writeProgressAfterAcknowledgement(
+        command,
+        cwd,
+        modelId,
+        language,
+        history,
+        processedBatchCount,
+        processedBySource,
+        reviewIds.size,
+        reviewedBatchCount,
+      );
+      emitBatchProgress(
+        options,
+        processedBatchCount,
+        history,
+        processedBySource,
+      );
+      continue;
+    }
+
+    nativeMergeAvailable = false;
+    await restoreWikiBackup(cwd, backup);
+    options.onEvent?.({
+      source: "main",
+      text: `原生 Agent 合并未通过（${shortError(nativeFailure)}），已回滚本批半成品，改用结构化安全降级。\n`,
+      type: "text",
+    });
+    let fallback: PersonalFallbackResult;
+    try {
+      fallback = await fallbackGenerate(cwd, checkpoint.candidates, language);
+    } catch (error) {
+      await restoreWikiBackup(cwd, backup);
+      await discardWikiBackup(backup);
+      throw error;
+    }
+    if (!fallback.report.valid) {
+      await restoreWikiBackup(cwd, backup);
+      await discardWikiBackup(backup);
+      throw qualityError("安全降级质量检查未通过", fallback.report.issues);
+    }
+    try {
+      await markReview(batch, history.scopeKey);
+      reviewIds.add(`${batch.connectorId}\0${batch.key}`);
+      await acknowledge(history);
+    } catch (error) {
+      await restoreWikiBackup(cwd, backup);
+      await discardWikiBackup(backup);
+      throw error;
+    }
+    await discardWikiBackup(backup);
+    processedBatchCount += 1;
+    incrementSource(processedBySource, batch.source);
+    await writeProgressAfterAcknowledgement(
+      command,
+      cwd,
+      modelId,
+      language,
+      history,
+      processedBatchCount,
+      processedBySource,
+      reviewIds.size,
+      reviewedBatchCount,
+    );
+    options.onEvent?.({
+      source: "main",
+      text: `安全降级已更新 ${fallback.files.length} 个页面；原始批次 checkpoint 已确认并加入复核队列（待复核 ${reviewIds.size} 个），继续处理下一批。\n`,
+      type: "text",
+    });
+    continue;
+  }
+}
+
+async function runFallbackReview(
+  command: Exclude<OpenWikiCommand, "chat">,
+  cwd: string,
+  modelId: string,
+  language: string,
+  review: CandidateReviewTask,
+  options: OpenWikiRunOptions,
+  runAgent: typeof runOpenWikiAgent,
+  finalize: NonNullable<PersonalPipelineDependencies["finalize"]>,
+): Promise<
+  { result: OpenWikiRunResult; valid: true } | { error: unknown; valid: false }
+> {
+  const baselineBodies = await capturePersonalWikiBodySnapshot(cwd);
+  const backup = await createWikiBackup(cwd);
+  try {
+    const result = await runAgent("update", cwd, {
+      ...options,
+      connectorToolProfile: "none",
+      isFollowup: false,
+      language,
+      modelId,
+      outputMode: "local-wiki",
+      suppressRunMetadata: true,
+      threadId: reviewThreadId(options.threadId, review),
+      userMessage: createCandidateMergeMessage(review.candidates, language),
+    });
+    const report = await finalize(cwd, {
+      allowFallbackGenerated: true,
+      baselineBodies,
+      candidates: review.candidates,
+      language,
+      requireCandidateReview: true,
+    });
+    if (!report.valid) {
+      throw qualityError("降级页面复核质量检查未通过", report.issues);
+    }
+    await discardWikiBackup(backup);
+    return { result, valid: true };
+  } catch (error) {
+    await restoreWikiBackup(cwd, backup);
+    await discardWikiBackup(backup);
+    return { error, valid: false };
+  }
+}
+
+async function finishPersonalRunPartial(
+  command: Exclude<OpenWikiCommand, "chat">,
+  cwd: string,
+  modelId: string,
+  language: string,
+  lastResult: OpenWikiRunResult,
+  options: OpenWikiRunOptions,
+  processedBatchCount: number,
+  processedBySource: Partial<Record<PersonalHistoryBatch["source"], number>>,
+  reviewedBatchCount: number,
+  pendingReviewCount: number,
+  reason: string,
+  scanBlockedSources: PersonalHistoryBatch["source"][] = [],
+): Promise<OpenWikiRunResult> {
+  await writePersonalRunMetadata(command, cwd, modelId, language, "partial", {
+    backlogBatchCount: 0,
+    backlogBySource: {},
+    pendingReviewCount,
+    processedBatchCount,
+    processedBySource,
+    reviewedBatchCount,
+    scanBlockedSources,
+  });
+  options.onEvent?.({
+    source: "main",
+    text: `${reason} 当前状态为 partial：原始 backlog=0，待复核=${pendingReviewCount}。\n`,
+    type: "text",
+  });
+  return {
+    ...lastResult,
+    backlogBatchCount: 0,
+    blockedSourceCount: scanBlockedSources.length,
+    command,
+    model: modelId,
+    pendingReviewCount,
+    processedBatchCount,
+    reviewBatchCount: reviewedBatchCount,
+    status: "partial",
+  };
+}
+
+interface PersonalProgressSnapshot {
+  backlogBatchCount: number;
+  backlogBySource: PersonalHistoryCollection["backlogBySource"];
+  pendingReviewCount: number;
+  processedBatchCount: number;
+  processedBySource: Partial<Record<PersonalHistoryBatch["source"], number>>;
+  reviewedBatchCount: number;
+  scanBlockedSources?: PersonalHistoryBatch["source"][];
+}
+
+async function writeProgressAfterAcknowledgement(
+  command: Exclude<OpenWikiCommand, "chat">,
+  cwd: string,
+  model: string,
+  language: string,
+  history: PersonalHistoryCollection,
+  processedBatchCount: number,
+  processedBySource: Partial<Record<PersonalHistoryBatch["source"], number>>,
+  pendingReviewCount: number,
+  reviewedBatchCount: number,
+): Promise<void> {
+  const backlogBySource = { ...history.backlogBySource };
+  const source = history.batches[0]?.source;
+  if (source) {
+    backlogBySource[source] = Math.max(0, (backlogBySource[source] ?? 0) - 1);
+  }
+  await writePersonalRunMetadata(command, cwd, model, language, "partial", {
+    backlogBatchCount: Math.max(0, history.backlogBatchCount - 1),
+    backlogBySource,
+    pendingReviewCount,
+    processedBatchCount,
+    processedBySource,
+    reviewedBatchCount,
+  });
+}
+
+async function writePersonalRunMetadata(
+  command: Exclude<OpenWikiCommand, "chat">,
+  cwd: string,
+  model: string,
+  language: string,
+  status: "complete" | "partial",
+  progress: PersonalProgressSnapshot,
+): Promise<void> {
+  const allSources = ["pi", "codex", "antigravity", "doubao"] as const;
+  const bySource = Object.fromEntries(
+    allSources.map((source) => {
+      const processed = progress.processedBySource[source] ?? 0;
+      const remaining = progress.backlogBySource[source] ?? 0;
+      return [source, { processed, remaining, total: processed + remaining }];
+    }),
+  );
+  const target = path.join(cwd, ".last-update.json");
+  await mkdir(path.dirname(target), { recursive: true });
+  await writeJsonAtomic(target, {
+    backlogBatchCount: progress.backlogBatchCount,
+    bySource,
+    command,
+    language,
+    model,
+    pendingReviewCount: progress.pendingReviewCount,
+    processedBatchCount: progress.processedBatchCount,
+    reviewedBatchCount: progress.reviewedBatchCount,
+    scanBlockedSources: progress.scanBlockedSources ?? [],
+    status,
+    totalBatchCount: progress.processedBatchCount + progress.backlogBatchCount,
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+function formatBatchStart(
+  batch: PersonalHistoryBatch,
+  history: PersonalHistoryCollection,
+  processedBatchCount: number,
+): string {
+  const current = processedBatchCount + 1;
+  const discoveredTotal = processedBatchCount + history.backlogBatchCount;
+  return `正在处理第 ${current}/${discoveredTotal} 个已发现批次：${batch.source}（${batch.recordCount} 条记录）；${formatBacklogBySource(history.backlogBySource)}。\n`;
+}
+
+function emitBatchProgress(
+  options: OpenWikiRunOptions,
+  processedBatchCount: number,
+  history: PersonalHistoryCollection,
+  processedBySource: Partial<Record<PersonalHistoryBatch["source"], number>>,
+): void {
+  const remainingBySource = { ...history.backlogBySource };
+  const source = history.batches[0]?.source;
+  if (source)
+    remainingBySource[source] = Math.max(
+      0,
+      (remainingBySource[source] ?? 0) - 1,
+    );
+  options.onEvent?.({
+    source: "main",
+    text: `批次 checkpoint 已确认：本次已完成 ${processedBatchCount} 个，当前已发现待处理 ${Math.max(0, history.backlogBatchCount - 1)} 个；${formatBacklogBySource(remainingBySource)}；本次来源完成 ${formatBacklogBySource(processedBySource)}。\n`,
+    type: "text",
+  });
+}
+
+function formatBacklogBySource(
+  values: Partial<Record<PersonalHistoryBatch["source"], number>>,
+): string {
+  return ["pi", "codex", "antigravity", "doubao"]
+    .map(
+      (source) =>
+        `${source}=${values[source as PersonalHistoryBatch["source"]] ?? 0}`,
+    )
+    .join("，");
+}
+
+function incrementSource(
+  counts: Partial<Record<PersonalHistoryBatch["source"], number>>,
+  source: PersonalHistoryBatch["source"],
+): void {
+  counts[source] = (counts[source] ?? 0) + 1;
+}
+
+function emitNewWarnings(
+  warnings: string[],
+  emitted: Set<string>,
+  options: OpenWikiRunOptions,
+): void {
+  for (const warning of warnings) {
+    if (emitted.has(warning)) continue;
+    emitted.add(warning);
+    if (emitted.size <= 20) {
+      options.onEvent?.({
+        source: "main",
+        text: `数据采集警告：${warning}\n`,
+        type: "text",
+      });
+    }
+  }
+}
+
+function batchThreadId(
+  base: string | undefined,
+  batch: PersonalHistoryBatch,
+): string | undefined {
+  if (!base) return undefined;
+  const suffix = createHash("sha256")
+    .update(`${batch.connectorId}\0${batch.key}`)
+    .digest("hex")
+    .slice(0, 12);
+  return `${base}-${suffix}`;
+}
+
+function reviewThreadId(
+  base: string | undefined,
+  review: CandidateReviewTask,
+): string | undefined {
+  if (!base) return undefined;
+  const suffix = createHash("sha256")
+    .update(review.id)
+    .digest("hex")
+    .slice(0, 12);
+  return `${base}-review-${suffix}`;
+}
+
+function qualityError(
+  prefix: string,
+  issues: Array<{ code: string; file?: string; message: string }>,
+): Error {
+  const detail = issues
+    .slice(0, 8)
+    .map((issue) => `${issue.file ? `${issue.file}: ` : ""}${issue.message}`)
+    .join("；");
+  return new Error(`${prefix}：${detail || "未知质量问题"}`);
+}
+
+function shortError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.replace(/\s+/gu, " ").slice(0, 240);
+}
+
+interface WikiBackup {
+  directory: string;
+  snapshot: string;
+}
+
+async function createWikiBackup(wikiRoot: string): Promise<WikiBackup> {
+  assertSafeWikiRoot(wikiRoot);
+  await stat(wikiRoot);
+  const directory = await mkdtemp(path.join(os.tmpdir(), "hwj-wiki-batch-"));
+  const snapshot = path.join(directory, "wiki");
+  await cp(wikiRoot, snapshot, { recursive: true });
+  return { directory, snapshot };
+}
+
+async function restoreWikiBackup(
+  wikiRoot: string,
+  backup: WikiBackup,
+): Promise<void> {
+  assertSafeWikiRoot(wikiRoot);
+  await rm(wikiRoot, { force: true, recursive: true });
+  await cp(backup.snapshot, wikiRoot, { recursive: true });
+}
+
+async function discardWikiBackup(backup: WikiBackup): Promise<void> {
+  await rm(backup.directory, { force: true, recursive: true });
+}
+
+function assertSafeWikiRoot(wikiRoot: string): void {
+  const resolved = path.resolve(wikiRoot);
+  if (resolved === path.parse(resolved).root || resolved === os.homedir()) {
+    throw new Error(`拒绝对不安全的 Wiki 根目录执行批次回滚：${resolved}`);
+  }
+}
+
+async function writeJsonAtomic(target: string, value: unknown): Promise<void> {
+  const temporary = `${target}.tmp-${process.pid}-${Date.now()}`;
+  await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, {
+    mode: 0o600,
+  });
+  await rename(temporary, target);
 }
 
 function createEvidenceMessage(
@@ -247,9 +1036,12 @@ function emptyHistoryCollection(
 ): PersonalHistoryCollection {
   return {
     backlogBatchCount: 0,
+    backlogBySource: {},
     batches: [],
     rawFiles: [],
     recordCount: 0,
+    scanBlockedSources: [],
+    scanPendingSources: [],
     scopeKey:
       mode === "personal"
         ? "personal"

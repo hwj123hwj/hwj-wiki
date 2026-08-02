@@ -25,6 +25,10 @@ import type {
   OpenWikiRunResult,
 } from "./agent/types.js";
 import {
+  withRunTelemetry,
+  type RunTelemetryContext,
+} from "./telemetry/index.js";
+import {
   applyPersonalWorkflowEnvironmentDefaults,
   PERSONAL_DEFAULT_LANGUAGE,
   verifyPersonalLiteLlmGateway,
@@ -173,7 +177,7 @@ async function runSourceIngestion({
 
     emitDeterministicPullSummary(emit, deterministicPull);
 
-    const agentResult = await runOpenWikiAgent("update", cwd, {
+    const runOptions: OpenWikiRunOptions = {
       isFollowup: false,
       language: PERSONAL_DEFAULT_LANGUAGE,
       modelId,
@@ -187,7 +191,17 @@ async function runSourceIngestion({
         rawFiles,
         sourceConfig,
       }),
-    });
+    };
+
+    // withRunTelemetry is the single boundary that records this per-source update
+    // run, matching the CLI paths so ingestion runs land in telemetry too.
+    const telemetryContext: RunTelemetryContext = {};
+    const agentResult = await withRunTelemetry(
+      "update",
+      runOptions,
+      telemetryContext,
+      () => runOpenWikiAgent("update", cwd, runOptions, telemetryContext),
+    );
 
     return {
       agentResult,

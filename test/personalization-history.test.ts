@@ -201,6 +201,68 @@ describe("personal history collection", () => {
     expect(total).toBe(500);
   });
 
+  test("advances past invalid trailing JSONL instead of reporting endless scan work", async () => {
+    const { repo, roots, stateRoot } = await fixture();
+    await writeFile(path.join(roots.codex, "invalid.jsonl"), "not-json");
+
+    const first = await collectPersonalHistory("personal", repo, {
+      roots,
+      stateRoot,
+    });
+    expect(first.recordCount).toBe(0);
+    expect(first.scanPendingSources).toEqual([]);
+    expect(first.warnings).toHaveLength(1);
+
+    const second = await collectPersonalHistory("personal", repo, {
+      roots,
+      stateRoot,
+    });
+    expect(second.recordCount).toBe(0);
+    expect(second.scanPendingSources).toEqual([]);
+    expect(second.warnings).toEqual([]);
+  });
+
+  test("reports more source scanning when a noise-only JSONL window ends before EOF", async () => {
+    const { repo, roots, stateRoot } = await fixture();
+    const events = Array.from({ length: 30 }, (_, index) =>
+      JSON.stringify({
+        payload: { content: `工具噪声 ${index}`, role: "developer" },
+        type: "response_item",
+      }),
+    );
+    events.push(
+      JSON.stringify({
+        payload: { content: "窗口之后的长期知识", role: "user" },
+        type: "response_item",
+      }),
+    );
+    await writeFile(
+      path.join(roots.codex, "windowed.jsonl"),
+      `${events.join("\n")}\n`,
+    );
+
+    let collection = await collectPersonalHistory("personal", repo, {
+      maxJsonlScanBytes: 512,
+      roots,
+      stateRoot,
+    });
+    expect(collection.recordCount).toBe(0);
+    expect(collection.scanPendingSources).toContain("codex");
+
+    for (
+      let attempt = 0;
+      attempt < 10 && collection.recordCount === 0;
+      attempt += 1
+    ) {
+      collection = await collectPersonalHistory("personal", repo, {
+        maxJsonlScanBytes: 512,
+        roots,
+        stateRoot,
+      });
+    }
+    expect(collection.recordCount).toBe(1);
+  });
+
   test("excludes Antigravity generated logs from canonical history", async () => {
     const { repo, roots, stateRoot } = await fixture();
     const generated = path.join(
@@ -227,5 +289,101 @@ describe("personal history collection", () => {
     const raw = await readFile(result.rawFiles[0], "utf8");
     expect(raw).toContain("保留的正式会话");
     expect(raw).not.toContain("generated noise");
+  });
+
+  test("round-robins pending batches across all four connectors", async () => {
+    const { repo, roots, stateRoot } = await fixture();
+    await writeFile(
+      path.join(roots.pi, "pi.jsonl"),
+      `${JSON.stringify({ id: "pi-1", message: { content: "Pi 记录", role: "user" }, type: "message" })}\n`,
+    );
+    await writeFile(
+      path.join(roots.codex, "codex.jsonl"),
+      `${JSON.stringify({ payload: { content: "Codex 记录", role: "user", type: "message" }, type: "response_item" })}\n`,
+    );
+    await writeFile(
+      path.join(roots.antigravity, "antigravity.jsonl"),
+      `${JSON.stringify({ content: "Antigravity 记录", source: "USER_EXPLICIT" })}\n`,
+    );
+    await writeFile(
+      path.join(roots.doubao, "doubao.json"),
+      JSON.stringify({
+        messages: [{ messageId: "d-1", role: "user", text: "豆包记录" }],
+      }),
+    );
+
+    const selected: string[] = [];
+    for (let index = 0; index < 4; index += 1) {
+      const collection = await collectPersonalHistory("personal", repo, {
+        roots,
+        stateRoot,
+      });
+      selected.push(collection.batches[0]?.source ?? "missing");
+      if (index === 0) {
+        expect(collection.backlogBatchCount).toBe(4);
+        expect(collection.backlogBySource).toEqual({
+          antigravity: 1,
+          codex: 1,
+          doubao: 1,
+          pi: 1,
+        });
+      }
+      await acknowledgePersonalHistoryBatches(collection, stateRoot);
+    }
+
+    expect(selected).toEqual(["pi", "codex", "antigravity", "doubao"]);
+  });
+
+  test("keeps code mode's shared record budget and source order", async () => {
+    const { repo, roots, stateRoot } = await fixture();
+    const piEvents = [
+      JSON.stringify({ cwd: repo, id: "code-pi", type: "session" }),
+    ];
+    for (let index = 0; index < 100; index += 1) {
+      piEvents.push(
+        JSON.stringify({
+          id: `pi-${index}`,
+          message: { content: `Pi ${index}`, role: "user" },
+          type: "message",
+        }),
+      );
+    }
+    await writeFile(
+      path.join(roots.pi, "pi.jsonl"),
+      `${piEvents.join("\n")}\n`,
+    );
+    await writeFile(
+      path.join(roots.codex, "codex.jsonl"),
+      [
+        JSON.stringify({
+          payload: { cwd: repo, id: "code-codex" },
+          type: "session_meta",
+        }),
+        JSON.stringify({
+          payload: {
+            content: "Codex should wait",
+            role: "user",
+            type: "message",
+          },
+          type: "response_item",
+        }),
+        "",
+      ].join("\n"),
+    );
+
+    const first = await collectPersonalHistory("code", repo, {
+      roots,
+      stateRoot,
+    });
+    expect(first.recordCount).toBe(100);
+    expect(first.sources).toEqual(["pi"]);
+    await acknowledgePersonalHistoryBatches(first, stateRoot);
+
+    const second = await collectPersonalHistory("code", repo, {
+      roots,
+      stateRoot,
+    });
+    expect(second.sources).toEqual(["codex"]);
+    expect(second.recordCount).toBe(1);
   });
 });

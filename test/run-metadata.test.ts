@@ -120,6 +120,47 @@ describe("persistRunMetadataIfChanged", () => {
     expect(metadata?.status).toBe("complete");
   });
 
+  test("clears a partial status when a completed run changes nothing", async () => {
+    const cwd = await createTempRepo();
+    await mkdir(path.join(cwd, "openwiki"), { recursive: true });
+    await writeFile(path.join(cwd, "openwiki", "index.md"), "# Docs\n", "utf8");
+    const initialSnapshot = await createOpenWikiContentSnapshot(
+      cwd,
+      "repository",
+    );
+    await writeFile(
+      path.join(cwd, "openwiki", "index.md"),
+      "# Partial\n",
+      "utf8",
+    );
+    await persistRunMetadataIfChanged(
+      "update",
+      cwd,
+      "test-model",
+      "repository",
+      initialSnapshot,
+      "partial",
+    );
+
+    const retrySnapshot = await createOpenWikiContentSnapshot(
+      cwd,
+      "repository",
+    );
+    const written = await persistRunMetadataIfChanged(
+      "update",
+      cwd,
+      "test-model",
+      "repository",
+      retrySnapshot,
+      "complete",
+    );
+
+    expect(written).toBe(true);
+    expect(await readMetadata(cwd, "openwiki/.last-update.json")).toMatchObject(
+      { status: "complete" },
+    );
+  });
+
   test("does not rewrite metadata when nothing changed after a complete run", async () => {
     const cwd = await createTempRepo();
 
