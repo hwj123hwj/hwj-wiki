@@ -15,6 +15,11 @@ export interface CandidateMergeResult {
   representedStableKeys: string[];
 }
 
+export interface CandidateDuplicateRepairResult {
+  archivedFiles: string[];
+  changedFiles: string[];
+}
+
 /**
  * Gives the unchanged upstream Agent a small, pre-validated knowledge payload.
  * Raw conversations are intentionally absent from this second stage.
@@ -96,11 +101,195 @@ export async function mergeCandidatesDeterministically(
   };
 }
 
+/**
+ * Reconciles duplicate pages created by an Agent that did not honor an exact
+ * stableKey match. The native Agent remains responsible for prose quality;
+ * this small deterministic pass only guarantees one canonical page per
+ * candidate key before the shared quality gate runs.
+ *
+ * Duplicate pages are moved below a hidden recovery directory instead of
+ * being deleted. The wiki index/finalizer deliberately ignores hidden paths,
+ * while the original content remains recoverable for manual inspection.
+ */
+export async function repairCandidateDuplicatePages(
+  wikiRoot: string,
+  candidates: KnowledgeCandidate[],
+  options: { fallbackGenerated: boolean },
+): Promise<CandidateDuplicateRepairResult> {
+  const pages = await readConceptPages(wikiRoot);
+  const changedFiles: string[] = [];
+  const archivedFiles: string[] = [];
+  const processedKeys = new Set<string>();
+
+  for (const candidate of candidates) {
+    if (processedKeys.has(candidate.stableKey)) continue;
+    processedKeys.add(candidate.stableKey);
+
+    const matching = pages.filter(
+      (page) =>
+        compatibleDirectory(page.relativePath, candidate) &&
+        pageMatchesStableKey(page, candidate.stableKey),
+    );
+    if (matching.length < 2) continue;
+
+    const canonical = [...matching].sort(compareCanonicalPages)[0];
+    if (!canonical) continue;
+
+    let merged = mergeCandidateIntoPage(
+      canonical.content,
+      candidate,
+      options.fallbackGenerated,
+    );
+    for (const duplicate of matching) {
+      if (duplicate.relativePath === canonical.relativePath) continue;
+      merged = mergeDuplicatePageContent(
+        merged,
+        duplicate.content,
+        candidate.stableKey,
+        options.fallbackGenerated,
+      );
+    }
+
+    const canonicalPath = path.join(
+      wikiRoot,
+      ...canonical.relativePath.split("/"),
+    );
+    if (merged !== canonical.content) {
+      await writeFileAtomic(canonicalPath, merged);
+      changedFiles.push(canonical.relativePath);
+    }
+
+    const archiveRoot = path.join(
+      wikiRoot,
+      ".openwiki-recovery",
+      "duplicate-stable-keys",
+      `${Date.now()}-${sha256(candidate.stableKey).slice(0, 12)}`,
+    );
+    for (const duplicate of matching) {
+      if (duplicate.relativePath === canonical.relativePath) continue;
+      const source = path.join(wikiRoot, ...duplicate.relativePath.split("/"));
+      const archived = path.join(
+        archiveRoot,
+        ...duplicate.relativePath.split("/"),
+      );
+      await mkdir(path.dirname(archived), { recursive: true });
+      await rename(source, archived);
+      archivedFiles.push(duplicate.relativePath);
+    }
+
+    const removed = new Set(
+      matching
+        .filter((page) => page.relativePath !== canonical.relativePath)
+        .map((page) => page.relativePath),
+    );
+    for (let index = pages.length - 1; index >= 0; index -= 1) {
+      if (removed.has(pages[index]?.relativePath ?? "")) pages.splice(index, 1);
+    }
+    const updatedIndex = pages.findIndex(
+      (page) => page.relativePath === canonical.relativePath,
+    );
+    if (updatedIndex >= 0) {
+      pages[updatedIndex] = {
+        ...pages[updatedIndex],
+        content: merged,
+        fields: parseFrontmatterFields(merged) ?? {},
+      };
+    }
+  }
+
+  return {
+    archivedFiles: unique(archivedFiles).sort(),
+    changedFiles: unique(changedFiles).sort(),
+  };
+}
+
 interface ExistingPage {
   content: string;
   fields: Record<string, unknown>;
   relativePath: string;
   title: string;
+}
+
+function pageMatchesStableKey(page: ExistingPage, stableKey: string): boolean {
+  return (
+    stringField(page.fields.stableKey) === stableKey ||
+    stringField(page.fields.stable_key) === stableKey ||
+    arrayField(page.fields.stableKeyAliases).includes(stableKey)
+  );
+}
+
+function compareCanonicalPages(
+  left: ExistingPage,
+  right: ExistingPage,
+): number {
+  const score = (page: ExistingPage): number => {
+    let value = 0;
+    if (!isHashedConceptFilename(page.relativePath)) value += 8;
+    if (page.fields.fallbackGenerated !== true) value += 4;
+    value += Math.min(page.content.length / 10_000, 2);
+    return value;
+  };
+  return (
+    score(right) - score(left) ||
+    left.relativePath.localeCompare(right.relativePath)
+  );
+}
+
+function isHashedConceptFilename(relativePath: string): boolean {
+  return /-[a-f0-9]{12}(?:-\d+)?\.md$/u.test(relativePath);
+}
+
+function mergeDuplicatePageContent(
+  current: string,
+  duplicate: string,
+  canonicalStableKey: string,
+  fallbackGenerated: boolean,
+): string {
+  const currentFields = parseFrontmatterFields(current) ?? {};
+  const duplicateFields = parseFrontmatterFields(duplicate) ?? {};
+  const aliases = unique([
+    ...arrayField(currentFields.stableKeyAliases),
+    ...arrayField(duplicateFields.stableKeyAliases),
+    ...[
+      stringField(duplicateFields.stableKey),
+      stringField(duplicateFields.stable_key),
+    ].filter(
+      (value): value is string =>
+        Boolean(value) && value !== canonicalStableKey,
+    ),
+  ]).sort();
+  const fields: Record<string, unknown> = {
+    ...currentFields,
+    confidence: weakestConfidence(
+      stringField(currentFields.confidence),
+      (stringField(duplicateFields.confidence) ??
+        "unverified") as KnowledgeCandidate["confidence"],
+    ),
+    fallbackGenerated,
+    sourceRefs: unique([
+      ...arrayField(currentFields.sourceRefs),
+      ...arrayField(duplicateFields.sourceRefs),
+    ]).sort(),
+    stableKey: canonicalStableKey,
+    tags: unique([
+      ...arrayField(currentFields.tags),
+      ...arrayField(duplicateFields.tags),
+    ]).sort(),
+  };
+  if (aliases.length > 0) fields.stableKeyAliases = aliases;
+
+  const currentBody = splitFrontmatter(current).body.trim();
+  const duplicateBody = splitFrontmatter(duplicate).body.trim();
+  const body =
+    duplicateBody && !currentBody.includes(duplicateBody)
+      ? `${currentBody}\n\n## 合并的历史内容\n\n${duplicateBody}`
+      : currentBody;
+  const frontmatter = stringify(fields, {
+    defaultKeyType: "PLAIN",
+    defaultStringType: "QUOTE_DOUBLE",
+    lineWidth: 0,
+  }).trimEnd();
+  return `---\n${frontmatter}\n---\n\n${body.trim()}\n`;
 }
 
 async function readConceptPages(

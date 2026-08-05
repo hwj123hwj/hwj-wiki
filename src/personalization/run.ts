@@ -52,7 +52,10 @@ import {
   generatePersonalWikiFallback,
   type PersonalFallbackResult,
 } from "./fallback.js";
-import { createCandidateMergeMessage } from "./merge.js";
+import {
+  createCandidateMergeMessage,
+  repairCandidateDuplicatePages,
+} from "./merge.js";
 import {
   applyPersonalWorkflowEnvironmentDefaults,
   PERSONAL_DEFAULT_LANGUAGE,
@@ -296,7 +299,6 @@ export async function runPersonalBatchPipeline(
   const initialReviews = await listReviews("personal");
   const initialReviewIds = new Set(initialReviews.map((review) => review.id));
   const reviewIds = new Set(initialReviewIds);
-  let nativeMergeAvailable = true;
 
   // Persist partial before touching a batch. The inner upstream runs suppress
   // their own metadata, closing the crash window where one bounded Agent call
@@ -345,21 +347,6 @@ export async function runPersonalBatchPipeline(
         initialReviewIds.has(item.id),
       );
       if (review) {
-        if (!nativeMergeAvailable) {
-          return finishPersonalRunPartial(
-            command,
-            cwd,
-            modelId,
-            language,
-            lastResult,
-            options,
-            processedBatchCount,
-            processedBySource,
-            reviewedBatchCount,
-            outstandingReviews.length,
-            "本轮原生 Agent 已失败，降级页面留待下次正常运行复核。",
-          );
-        }
         const reviewResult = await runFallbackReview(
           command,
           cwd,
@@ -556,11 +543,8 @@ export async function runPersonalBatchPipeline(
 
     const baselineBodies = await capturePersonalWikiBodySnapshot(cwd);
     const backup = await createWikiBackup(cwd);
-    let nativeFailure: unknown = nativeMergeAvailable
-      ? undefined
-      : new Error("本轮已切换为结构化降级模式。");
+    let nativeFailure: unknown;
     try {
-      if (!nativeMergeAvailable) throw nativeFailure;
       const mergeMessage = createCandidateMergeMessage(
         checkpoint.candidates,
         language,
@@ -581,6 +565,18 @@ export async function runPersonalBatchPipeline(
           mergeMessage,
         ),
       });
+      const duplicateRepair = await repairCandidateDuplicatePages(
+        cwd,
+        checkpoint.candidates,
+        { fallbackGenerated: false },
+      );
+      if (duplicateRepair.archivedFiles.length > 0) {
+        options.onEvent?.({
+          source: "main",
+          text: `原生合并发现 ${duplicateRepair.archivedFiles.length} 个重复页面，已合并并移入隐藏恢复目录。\n`,
+          type: "text",
+        });
+      }
       const report = await finalize(cwd, {
         allowFallbackGenerated: true,
         baselineBodies,
@@ -620,7 +616,6 @@ export async function runPersonalBatchPipeline(
       continue;
     }
 
-    nativeMergeAvailable = false;
     await restoreWikiBackup(cwd, backup);
     options.onEvent?.({
       source: "main",
@@ -698,6 +693,18 @@ async function runFallbackReview(
       threadId: reviewThreadId(options.threadId, review),
       userMessage: createCandidateMergeMessage(review.candidates, language),
     });
+    const duplicateRepair = await repairCandidateDuplicatePages(
+      cwd,
+      review.candidates,
+      { fallbackGenerated: false },
+    );
+    if (duplicateRepair.archivedFiles.length > 0) {
+      options.onEvent?.({
+        source: "main",
+        text: `复核合并发现 ${duplicateRepair.archivedFiles.length} 个重复页面，已合并并移入隐藏恢复目录。\n`,
+        type: "text",
+      });
+    }
     const report = await finalize(cwd, {
       allowFallbackGenerated: true,
       baselineBodies,

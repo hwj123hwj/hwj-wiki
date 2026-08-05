@@ -331,4 +331,71 @@ describe("personal multi-batch pipeline", () => {
     expect(nativeAttempts).toBe(2);
     expect(acknowledgements).toBe(1);
   });
+
+  test("does not demote every later batch after one native merge failure", async () => {
+    const root = await wikiRoot();
+    const first = batch("doubao", 1);
+    const second = batch("codex", 2);
+    const queue = [first, second];
+    const reviews: CandidateReviewTask[] = [];
+    const candidate: KnowledgeCandidate = {
+      confidence: "source-backed",
+      decisions: [],
+      facts: ["批次需要保留可恢复进度"],
+      reusableLessons: [],
+      sourceRefs: ["doubao-export:run-1/records-0001.json#candidate"],
+      stableKey: "global/lesson/retryable-batch",
+      summary: "批次失败后应允许后续批次继续尝试原生合并。",
+      tags: ["批处理"],
+      title: "原生合并失败不应污染后续批次",
+      type: "Lesson",
+      volatile: false,
+    };
+    let nativeAttempts = 0;
+
+    const result = await runPersonalBatchPipeline(
+      "update",
+      root,
+      { language: "zh-CN", modelId: "coding", outputMode: "local-wiki" },
+      {
+        acknowledge: () => {
+          queue.shift();
+          return Promise.resolve();
+        },
+        collect: () => Promise.resolve(collection(queue)),
+        extract: (item) => Promise.resolve(checkpoint(item, [candidate])),
+        fallback: () =>
+          Promise.resolve({
+            files: ["lessons/fallback.md"],
+            report: validReport,
+          }),
+        finalize: () => Promise.resolve(validReport),
+        listReviews: () => Promise.resolve(reviews),
+        markReview: (item) => {
+          reviews.push({
+            ...checkpoint(item, [candidate]),
+            checkpointPath: "/private/checkpoint.json",
+            id: `${item.connectorId}\0${item.key}`,
+            reviewRequired: true,
+          });
+          return Promise.resolve();
+        },
+        runAgent: (command: "chat" | "init" | "update") => {
+          nativeAttempts += 1;
+          if (nativeAttempts === 1) {
+            return Promise.reject(new Error("temporary native failure"));
+          }
+          return Promise.resolve({ command, model: "coding" });
+        },
+      },
+    );
+
+    expect(result).toMatchObject({
+      backlogBatchCount: 0,
+      pendingReviewCount: 1,
+      processedBatchCount: 2,
+      status: "partial",
+    });
+    expect(nativeAttempts).toBe(2);
+  });
 });

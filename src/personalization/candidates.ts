@@ -2,10 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { HumanMessage, SystemMessage } from "@langchain/core/messages";
-import {
-  resolveConfiguredProvider,
-  resolveProviderRetryAttempts,
-} from "../constants.js";
+import { resolveConfiguredProvider } from "../constants.js";
 import { createModel } from "../agent/index.js";
 import { getConnectorDir, getConnectorRawDir } from "../openwiki-home.js";
 import {
@@ -15,12 +12,32 @@ import {
   type PersonalHistoryRecord,
 } from "./history.js";
 
-const DEFAULT_EXTRACTION_TIMEOUT_MS = 120_000;
-const DEFAULT_EXTRACTION_MAX_EVIDENCE_BYTES = 40_000;
+// Keep the client deadline below the gateway's 120 s upstream deadline. A
+// timed-out large request can then be split and retried instead of making the
+// whole personal run appear frozen for two minutes before the gateway returns
+// 503.
+const DEFAULT_EXTRACTION_TIMEOUT_MS = 60_000;
+// Candidate extraction already has its own bounded retry/split policy below.
+// Reusing the global LangChain retry budget here causes one aborted gateway
+// request to be retried inside the model client and then retried again by the
+// extractor, multiplying latency without giving the fallback chain a fresh
+// request context. Keep this at zero by default; advanced users can opt into a
+// small number of client retries when their provider is known to be reliable.
+const DEFAULT_EXTRACTION_PROVIDER_RETRIES = 0;
+// Candidate extraction only needs bounded evidence, not the entire transcript.
+// Smaller chunks also make provider latency predictable for long assistant
+// replies while preserving the original raw record in the private connector
+// archive for later review.
+const DEFAULT_EXTRACTION_MAX_EVIDENCE_BYTES = 8_000;
 const EXTRACTION_TIMEOUT_ENV_KEY = "OPENWIKI_PERSONAL_EXTRACTION_TIMEOUT_MS";
+const EXTRACTION_PROVIDER_RETRIES_ENV_KEY =
+  "OPENWIKI_PERSONAL_EXTRACTION_PROVIDER_RETRIES";
 const EXTRACTION_MAX_EVIDENCE_ENV_KEY =
   "OPENWIKI_PERSONAL_EXTRACTION_MAX_BYTES";
+const MAX_EVIDENCE_TEXT_BYTES = 4_000;
+const MIN_EVIDENCE_TEXT_BYTES = 1_000;
 const MAX_CANDIDATES_PER_BATCH = 12;
+const MAX_EXTRACTION_RESPONSE_ATTEMPTS = 3;
 const PRIVATE_DIR_MODE = 0o700;
 const PRIVATE_FILE_MODE = 0o600;
 
@@ -128,7 +145,13 @@ export async function extractKnowledgeCandidates(
   }
   const invoke =
     options.invokeModel ??
-    createDefaultInvoker(modelId, resolveProviderRetryAttempts());
+    createDefaultInvoker(
+      modelId,
+      readNonNegativeIntegerEnv(
+        EXTRACTION_PROVIDER_RETRIES_ENV_KEY,
+        DEFAULT_EXTRACTION_PROVIDER_RETRIES,
+      ),
+    );
   const candidates = await extractCandidateChunks(
     batch,
     parsed.records,
@@ -257,8 +280,9 @@ export function createCandidateExtractionPrompt(
   batch: PersonalHistoryBatch,
   records: PersonalHistoryRecord[],
   language: string,
+  maxEvidenceTextBytes = MAX_EVIDENCE_TEXT_BYTES,
 ): string {
-  const evidence = candidateEvidence(batch, records);
+  const evidence = candidateEvidence(batch, records, maxEvidenceTextBytes);
   return `请用 ${language} 提取知识候选。
 
 每个候选字段：
@@ -323,9 +347,10 @@ async function extractCandidateChunks(
   invoke: (messages: Array<SystemMessage | HumanMessage>) => Promise<unknown>,
   generatedAt: string | undefined,
 ): Promise<KnowledgeCandidate[]> {
+  const uniqueRecords = deduplicateEvidenceRecords(records);
   const chunks = splitRecordsByEvidenceBytes(
     batch,
-    records,
+    uniqueRecords,
     readPositiveIntegerEnv(
       EXTRACTION_MAX_EVIDENCE_ENV_KEY,
       DEFAULT_EXTRACTION_MAX_EVIDENCE_BYTES,
@@ -340,6 +365,7 @@ async function extractCandidateChunks(
         language,
         invoke,
         generatedAt,
+        MAX_EVIDENCE_TEXT_BYTES,
       )),
     );
   }
@@ -352,52 +378,88 @@ async function extractCandidateChunk(
   language: string,
   invoke: (messages: Array<SystemMessage | HumanMessage>) => Promise<unknown>,
   generatedAt: string | undefined,
+  maxEvidenceTextBytes: number,
 ): Promise<KnowledgeCandidate[]> {
   const allowedRefs = new Map(
     records.map((record) => [sourceRef(batch, record.id), record]),
   );
   const messages = [
     new SystemMessage(CANDIDATE_EXTRACTION_SYSTEM_PROMPT),
-    new HumanMessage(createCandidateExtractionPrompt(batch, records, language)),
+    new HumanMessage(
+      createCandidateExtractionPrompt(
+        batch,
+        records,
+        language,
+        maxEvidenceTextBytes,
+      ),
+    ),
   ];
 
-  let output: unknown;
-  let firstError: unknown;
-  try {
-    output = await invokeWithTimeout(invoke, messages);
-  } catch (error) {
-    if (isRetryableExtractionDeadline(error) && records.length > 1) {
-      return extractAfterSplit(batch, records, language, invoke, generatedAt);
+  let lastError: unknown;
+  for (
+    let attempt = 0;
+    attempt < MAX_EXTRACTION_RESPONSE_ATTEMPTS;
+    attempt += 1
+  ) {
+    const attemptMessages =
+      attempt === 0
+        ? messages
+        : [
+            ...messages,
+            new HumanMessage(
+              '上一次输出不是可解析的严格 JSON。请只重新输出一个 JSON 对象，格式为 {"candidates": [...]}；不要解释、不要 Markdown、不要代码围栏。',
+            ),
+          ];
+    try {
+      const output = await invokeWithTimeout(invoke, attemptMessages);
+      const candidates = parseCandidateResponse(
+        output,
+        allowedRefs,
+        generatedAt,
+      );
+      if (candidates) return candidates;
+    } catch (error) {
+      lastError = error;
+      if (isRetryableExtractionDeadline(error) && records.length > 1) {
+        return extractAfterSplit(
+          batch,
+          records,
+          language,
+          invoke,
+          generatedAt,
+          maxEvidenceTextBytes,
+        );
+      }
+      if (
+        isRetryableExtractionDeadline(error) &&
+        maxEvidenceTextBytes > MIN_EVIDENCE_TEXT_BYTES
+      ) {
+        return extractCandidateChunk(
+          batch,
+          records,
+          language,
+          invoke,
+          generatedAt,
+          Math.max(
+            MIN_EVIDENCE_TEXT_BYTES,
+            Math.floor(maxEvidenceTextBytes / 2),
+          ),
+        );
+      }
     }
-    firstError = error;
   }
 
-  let candidates = firstError
-    ? undefined
-    : parseCandidateResponse(output, allowedRefs, generatedAt);
-  if (!candidates) {
-    const repairMessages = [
-      ...messages,
-      new HumanMessage(
-        '上一次输出不是可解析的严格 JSON。请只重新输出一个 JSON 对象，格式为 {"candidates": [...]}；不要解释，不要代码围栏。',
-      ),
-    ];
-    try {
-      output = await invokeWithTimeout(invoke, repairMessages);
-      candidates = parseCandidateResponse(output, allowedRefs, generatedAt);
-    } catch (error) {
-      if (isRetryableExtractionDeadline(error) && records.length > 1) {
-        return extractAfterSplit(batch, records, language, invoke, generatedAt);
-      }
-      throw new Error(`知识候选提取失败：${errorMessage(error)}`, {
-        cause: error,
-      });
-    }
+  if (lastError) {
+    throw new Error(
+      `知识候选提取失败（${batch.connectorId}/${batch.path}，${records.length} 条记录，证据上限 ${maxEvidenceTextBytes} 字节）：${errorMessage(lastError)}`,
+      {
+        cause: lastError,
+      },
+    );
   }
-  if (!candidates) {
-    throw new Error("知识候选提取失败：模型连续两次没有返回有效 JSON。");
-  }
-  return candidates;
+  throw new Error(
+    `知识候选提取失败：模型连续 ${MAX_EXTRACTION_RESPONSE_ATTEMPTS} 次没有返回有效 JSON。`,
+  );
 }
 
 async function extractAfterSplit(
@@ -406,6 +468,7 @@ async function extractAfterSplit(
   language: string,
   invoke: (messages: Array<SystemMessage | HumanMessage>) => Promise<unknown>,
   generatedAt: string | undefined,
+  maxEvidenceTextBytes: number,
 ): Promise<KnowledgeCandidate[]> {
   const midpoint = Math.ceil(records.length / 2);
   const candidates: KnowledgeCandidate[] = [];
@@ -418,6 +481,7 @@ async function extractAfterSplit(
         language,
         invoke,
         generatedAt,
+        maxEvidenceTextBytes,
       )),
     );
   }
@@ -453,6 +517,7 @@ function splitRecordsByEvidenceBytes(
 function candidateEvidence(
   batch: PersonalHistoryBatch,
   records: PersonalHistoryRecord[],
+  maxEvidenceTextBytes = MAX_EVIDENCE_TEXT_BYTES,
 ): Array<{
   kind: string;
   role?: string;
@@ -464,9 +529,48 @@ function candidateEvidence(
     kind: record.kind,
     role: record.role,
     sourceRef: sourceRef(batch, record.id),
-    text: record.text,
+    text: boundEvidenceText(record.text, maxEvidenceTextBytes),
     timestamp: record.timestamp,
   }));
+}
+
+/**
+ * Codex exports can contain the same message twice as `event_msg` and
+ * `response_item`. Keep one exact evidence copy for extraction; the raw
+ * archive and processing receipt still retain every original record.
+ */
+function deduplicateEvidenceRecords(
+  records: PersonalHistoryRecord[],
+): PersonalHistoryRecord[] {
+  const seen = new Set<string>();
+  return records.filter((record) => {
+    const key = JSON.stringify([
+      record.role ?? "",
+      record.sessionId,
+      record.timestamp ?? "",
+      record.text,
+    ]);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function boundEvidenceText(
+  value: string,
+  maxEvidenceTextBytes = MAX_EVIDENCE_TEXT_BYTES,
+): string {
+  const bytes = Buffer.from(value, "utf8");
+  if (bytes.length <= maxEvidenceTextBytes) return value;
+
+  const marker = "\n\n[...本轮提取已截断，完整证据保留在本地原始归档...]\n\n";
+  const markerBytes = Buffer.byteLength(marker, "utf8");
+  const remaining = Math.max(0, maxEvidenceTextBytes - markerBytes);
+  const headBytes = Math.ceil(remaining / 2);
+  const tailBytes = remaining - headBytes;
+  return `${bytes.subarray(0, headBytes).toString("utf8")}${marker}${bytes
+    .subarray(bytes.length - tailBytes)
+    .toString("utf8")}`;
 }
 
 function isRetryableExtractionDeadline(error: unknown): boolean {
@@ -484,6 +588,11 @@ function isRetryableExtractionDeadline(error: unknown): boolean {
 function readPositiveIntegerEnv(key: string, fallback: number): number {
   const value = Number(process.env[key]);
   return Number.isSafeInteger(value) && value > 0 ? value : fallback;
+}
+
+function readNonNegativeIntegerEnv(key: string, fallback: number): number {
+  const value = Number(process.env[key]);
+  return Number.isSafeInteger(value) && value >= 0 ? value : fallback;
 }
 
 async function invokeWithTimeout(
@@ -746,9 +855,32 @@ function extractJsonObject(text: string): string | undefined {
     .replace(/^```(?:json)?\s*/iu, "")
     .replace(/\s*```$/u, "")
     .trim();
-  const start = unfenced.indexOf("{");
-  const end = unfenced.lastIndexOf("}");
-  return start >= 0 && end > start ? unfenced.slice(start, end + 1) : undefined;
+  for (let start = 0; start < unfenced.length; start += 1) {
+    if (unfenced[start] !== "{") continue;
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    for (let index = start; index < unfenced.length; index += 1) {
+      const character = unfenced[index];
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (character === "\\") escaped = true;
+        else if (character === '"') inString = false;
+        continue;
+      }
+      if (character === '"') {
+        inString = true;
+        continue;
+      }
+      if (character === "{") depth += 1;
+      else if (character === "}") {
+        depth -= 1;
+        if (depth === 0) return unfenced.slice(start, index + 1);
+        if (depth < 0) break;
+      }
+    }
+  }
+  return undefined;
 }
 
 function messageText(content: unknown): string {

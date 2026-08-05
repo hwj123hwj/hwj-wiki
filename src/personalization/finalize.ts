@@ -30,7 +30,10 @@ const BATCH_MUTATION_EXEMPT_FILES = new Set([
   "open-questions.md",
 ]);
 const SOURCE_REF_PATTERN = /^([a-z][a-z0-9-]{0,63}):(.+)#([a-f0-9]{24})$/u;
-const MARKDOWN_LINK_PATTERN = /!?\[[^\]]*\]\(([^)]+)\)/gu;
+// Match escaped Markdown label characters (for example `\[29\]`) as part of
+// the label. Index labels are escaped deliberately, and treating the escaped
+// closing bracket as the end of a label makes valid pages look orphaned.
+const MARKDOWN_LINK_PATTERN = /!?\[(?:\\.|[^\\\]])*\]\(([^)]+)\)/gu;
 const PERSONAL_POSIX_PATH_PREFIX_PATTERN = /\/(?:Users|home)\/[^/\s]+/gu;
 const PERSONAL_WINDOWS_PATH_PREFIX_PATTERN = /[A-Za-z]:\\Users\\[^\\\s]+/gu;
 const VALID_KNOWLEDGE_TYPES = new Set<string>(KNOWLEDGE_CANDIDATE_TYPES);
