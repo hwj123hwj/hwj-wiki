@@ -14,6 +14,7 @@ import { ensureOpenWikiHome, openWikiSkillsDir } from "../openwiki-home.js";
 const bundledSkillsDir = fileURLToPath(
   new URL("../../skills", import.meta.url),
 );
+const replacementLocks = new Map<string, Promise<void>>();
 
 /** Copies bundled skills into the OpenWiki home while preserving other skills. */
 export async function syncBundledSkills(): Promise<void> {
@@ -26,15 +27,39 @@ export async function replaceSkillDirectories(
   sourceDir: string,
   targetDir: string,
 ): Promise<void> {
-  const skills = (await readdir(sourceDir, { withFileTypes: true })).filter(
-    (entry) => entry.isDirectory(),
-  );
+  // Windows does not allow two concurrent renames of the same directory. A
+  // single process can trigger overlapping syncs (for example, two init paths
+  // starting together), so serialize replacements for each target directory.
+  // Different OpenWiki homes remain independent and can still sync in
+  // parallel.
+  const lockKey = path.resolve(targetDir);
+  const previous = replacementLocks.get(lockKey) ?? Promise.resolve();
+  let release!: () => void;
+  const current = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const queued = previous.then(() => current);
+  replacementLocks.set(lockKey, queued);
 
-  await mkdir(targetDir, { recursive: true });
+  await previous;
+  try {
+    const skills = (await readdir(sourceDir, { withFileTypes: true })).filter(
+      (entry) => entry.isDirectory(),
+    );
 
-  await Promise.all(
-    skills.map(({ name }) => replaceSkillDirectory(sourceDir, targetDir, name)),
-  );
+    await mkdir(targetDir, { recursive: true });
+
+    await Promise.all(
+      skills.map(({ name }) =>
+        replaceSkillDirectory(sourceDir, targetDir, name),
+      ),
+    );
+  } finally {
+    release();
+    if (replacementLocks.get(lockKey) === queued) {
+      replacementLocks.delete(lockKey);
+    }
+  }
 }
 
 /**
