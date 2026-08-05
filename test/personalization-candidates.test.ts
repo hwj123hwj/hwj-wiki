@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
@@ -61,7 +61,231 @@ async function candidateFixture(
   return { batch, sourceRef, stateRoot };
 }
 
+async function multiRecordCandidateFixture(
+  recordCount: number,
+  textLength: number,
+) {
+  const stateRoot = await mkdtemp(path.join(tmpdir(), "hwj-candidates-"));
+  temporaryRoots.push(stateRoot);
+  const relativePath = "run-1/records-0002.json";
+  const rawDir = path.join(stateRoot, "codex-history", "raw", "run-1");
+  await mkdir(rawDir, { recursive: true });
+  const records = Array.from({ length: recordCount }, (_, index) => ({
+    id: `1234567890abcdef123456${String(index).padStart(2, "0")}`,
+    kind: "message",
+    role: "user" as const,
+    sessionId: "codex-session",
+    source: "codex" as const,
+    text: `记录 ${index}\n${"x".repeat(textLength)}`,
+    timestamp: "2026-08-01T08:00:00Z",
+  }));
+  await writeFile(
+    path.join(rawDir, "records-0002.json"),
+    JSON.stringify({
+      generatedAt: "2026-08-02T01:00:00Z",
+      records,
+      scopeKey: "personal",
+    }),
+  );
+  const batch: PersonalHistoryBatch = {
+    byteSize: 500,
+    connectorId: "codex-history",
+    key: relativePath,
+    path: relativePath,
+    recordCount,
+    source: "codex",
+  };
+  return { batch, stateRoot };
+}
+
+function candidateResponseForMessages(
+  messages: Array<{ content: unknown }>,
+  title: string,
+): string {
+  const content = messages[1]?.content;
+  const prompt =
+    typeof content === "string" ? content : JSON.stringify(content);
+  const sourceRef = /"sourceRef":"([^"]+)"/u.exec(prompt)?.[1];
+  if (!sourceRef) throw new Error("test prompt did not contain a sourceRef");
+  return JSON.stringify({
+    candidates: [
+      {
+        confidence: "source-backed",
+        decisions: [],
+        facts: [],
+        reusableLessons: ["按批次边界提取，避免单次请求过大"],
+        sourceRefs: [sourceRef],
+        summary: `${title}摘要`,
+        tags: ["测试"],
+        title,
+        type: "Lesson",
+        volatile: false,
+      },
+    ],
+  });
+}
+
 describe("personal knowledge candidate extraction", () => {
+  test("splits oversized batches before invoking the model", async () => {
+    const { batch, stateRoot } = await multiRecordCandidateFixture(4, 15_000);
+    let invocations = 0;
+    const checkpoint = await extractKnowledgeCandidates(
+      batch,
+      "personal",
+      "coding",
+      "zh-CN",
+      {
+        invokeModel: (messages) => {
+          invocations += 1;
+          return Promise.resolve(
+            candidateResponseForMessages(messages, `批次分片 ${invocations}`),
+          );
+        },
+        stateRoot,
+      },
+    );
+
+    expect(invocations).toBeGreaterThan(1);
+    expect(checkpoint.candidates).toHaveLength(invocations);
+    expect(
+      checkpoint.candidates.every(
+        (candidate) => candidate.sourceRefs.length > 0,
+      ),
+    ).toBe(true);
+  });
+
+  test("splits a chunk after an abort instead of repeating the same oversized request", async () => {
+    const { batch, stateRoot } = await multiRecordCandidateFixture(4, 100);
+    let invocations = 0;
+    const checkpoint = await extractKnowledgeCandidates(
+      batch,
+      "personal",
+      "coding",
+      "zh-CN",
+      {
+        invokeModel: (messages) => {
+          invocations += 1;
+          if (invocations === 1) {
+            return Promise.reject(new Error("Request was aborted"));
+          }
+          return Promise.resolve(
+            candidateResponseForMessages(messages, `重试分片 ${invocations}`),
+          );
+        },
+        stateRoot,
+      },
+    );
+
+    expect(invocations).toBe(3);
+    expect(checkpoint.candidates).toHaveLength(2);
+  });
+
+  test("shrinks a single oversized record after an abort", async () => {
+    const { batch, stateRoot } = await candidateFixture(
+      "user",
+      "重要结论\n" + "x".repeat(30_000),
+    );
+    let invocations = 0;
+    const checkpoint = await extractKnowledgeCandidates(
+      batch,
+      "personal",
+      "coding",
+      "zh-CN",
+      {
+        invokeModel: (messages) => {
+          invocations += 1;
+          const content = messages[1]?.content;
+          const prompt =
+            typeof content === "string"
+              ? content
+              : (JSON.stringify(content) ?? "");
+          if (Buffer.byteLength(prompt, "utf8") > 5_000) {
+            return Promise.reject(new Error("Request was aborted"));
+          }
+          return Promise.resolve(
+            candidateResponseForMessages(messages, "缩小后的分片"),
+          );
+        },
+        stateRoot,
+      },
+    );
+
+    expect(invocations).toBe(2);
+    expect(checkpoint.candidates).toHaveLength(1);
+  });
+
+  test("bounds oversized individual evidence and removes export duplicates", async () => {
+    const { batch, stateRoot, sourceRef } = await candidateFixture(
+      "user",
+      "重要结论\n" + "x".repeat(30_000),
+    );
+    const rawPath = path.join(
+      stateRoot,
+      "codex-history",
+      "raw",
+      "run-1",
+      "records-0001.json",
+    );
+    const raw = JSON.parse(await readFile(rawPath, "utf8")) as {
+      records: Array<Record<string, unknown>>;
+    };
+    const original = raw.records[0];
+    if (!original) throw new Error("missing candidate fixture record");
+    raw.records.push({ ...original, kind: "event_msg", id: "duplicate-id" });
+    await writeFile(rawPath, JSON.stringify(raw));
+
+    let invocations = 0;
+    const checkpoint = await extractKnowledgeCandidates(
+      batch,
+      "personal",
+      "coding",
+      "zh-CN",
+      {
+        invokeModel: (messages) => {
+          invocations += 1;
+          const content = messages[1]?.content;
+          const prompt =
+            typeof content === "string"
+              ? content
+              : (JSON.stringify(content) ?? "");
+          expect(prompt).toContain("本轮提取已截断");
+          expect(Buffer.byteLength(prompt, "utf8")).toBeLessThan(20_000);
+          return Promise.resolve(
+            candidateResponseForMessages(messages, "边界控制"),
+          );
+        },
+        stateRoot,
+      },
+    );
+
+    expect(invocations).toBe(1);
+    expect(checkpoint.candidates[0]?.sourceRefs).toEqual([sourceRef]);
+  });
+
+  test("retries transient non-JSON model output before failing the batch", async () => {
+    const { batch, stateRoot } = await candidateFixture();
+    let invocations = 0;
+    const checkpoint = await extractKnowledgeCandidates(
+      batch,
+      "personal",
+      "coding",
+      "zh-CN",
+      {
+        invokeModel: (messages) => {
+          invocations += 1;
+          if (invocations < 3) return Promise.resolve("模型正在分析，请稍候。");
+          return Promise.resolve(
+            candidateResponseForMessages(messages, "第三次输出恢复为 JSON"),
+          );
+        },
+        stateRoot,
+      },
+    );
+
+    expect(invocations).toBe(3);
+    expect(checkpoint.candidates).toHaveLength(1);
+  });
+
   test("keeps the merge pass scoped to candidates instead of rereading raw history", () => {
     const message = createCandidateMergeMessage(
       [

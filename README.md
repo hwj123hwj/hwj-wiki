@@ -15,7 +15,9 @@ Pi、Codex、Antigravity、豆包轮询处理到 backlog 清空，但每次模�
 个人模式先把脱敏历史提取成带 `stableKey`、`sourceRefs`、可信度和时效标记的
 结构化候选，再用严格限定的目标提示词交给原 OpenWiki Agent 合并。安全降级也
 只消费结构化候选，并执行同一套 OKF、索引、断链、去重、来源和敏感信息检查；
-降级页面进入独立复核队列，复核完成前不会误报 `complete`。
+降级页面进入独立复核队列，复核完成前不会误报 `complete`。个人候选提取默认关闭
+模型客户端的额外重试，由适配层统一控制分片和重试，避免网关抖动被多层重试放大；
+确实需要时可设置 `OPENWIKI_PERSONAL_EXTRACTION_PROVIDER_RETRIES`（非负整数）。
 
 ```bash
 npm install --global hwj-wiki

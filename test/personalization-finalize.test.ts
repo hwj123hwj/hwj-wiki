@@ -15,6 +15,7 @@ import {
   capturePersonalWikiBodySnapshot,
   finalizePersonalWiki,
 } from "../src/personalization/finalize.ts";
+import { repairCandidateDuplicatePages } from "../src/personalization/merge.ts";
 
 const temporaryRoots: string[] = [];
 
@@ -128,6 +129,59 @@ describe("personal wiki deterministic finalization", () => {
     expect(themes).toContain(lessonFiles[0]);
   });
 
+  test("repairs duplicate stable-key pages before the quality gate", async () => {
+    const { refs, stateRoot, wikiRoot } = await fixture();
+    const candidate = lesson(
+      refs[0],
+      "原生合并重复建页时仍需保留一份 canonical 页面。",
+    );
+    const generated = await generatePersonalWikiFallback(
+      wikiRoot,
+      [candidate],
+      "zh-CN",
+      stateRoot,
+    );
+    const duplicatePath = path.join(
+      wikiRoot,
+      "lessons",
+      "lesson-readable-duplicate.md",
+    );
+    await writeFile(
+      duplicatePath,
+      await readFile(path.join(wikiRoot, generated.files[0]), "utf8"),
+    );
+
+    const repaired = await repairCandidateDuplicatePages(
+      wikiRoot,
+      [candidate],
+      { fallbackGenerated: false },
+    );
+
+    expect(repaired.archivedFiles).toHaveLength(1);
+    expect(repaired.changedFiles).toHaveLength(1);
+    const lessonFiles = (await readdir(path.join(wikiRoot, "lessons"))).filter(
+      (file) => file !== "index.md",
+    );
+    expect(lessonFiles).toEqual(["lesson-readable-duplicate.md"]);
+    const archived = path.join(
+      wikiRoot,
+      ".openwiki-recovery",
+      "duplicate-stable-keys",
+    );
+    expect((await readdir(archived)).length).toBe(1);
+
+    const report = await finalizePersonalWiki(wikiRoot, {
+      allowFallbackGenerated: true,
+      candidates: [candidate],
+      language: "zh-CN",
+      stateRoot,
+    });
+    expect(report.valid).toBe(true);
+    expect(
+      await readFile(path.join(wikiRoot, "lessons", lessonFiles[0]), "utf8"),
+    ).toContain("fallbackGenerated: false");
+  });
+
   test("a broken relative link is a blocking quality issue", async () => {
     const { refs, stateRoot, wikiRoot } = await fixture();
     const candidate = lesson(refs[0], "所有链接必须可解析。");
@@ -154,6 +208,45 @@ describe("personal wiki deterministic finalization", () => {
     expect(report.issues).toContainEqual(
       expect.objectContaining({ code: "broken_link" }),
     );
+  });
+
+  test("redacts personal absolute paths left by an earlier Agent pass", async () => {
+    const { refs, stateRoot, wikiRoot } = await fixture();
+    const sourcesDir = path.join(wikiRoot, "sources");
+    await mkdir(sourcesDir, { recursive: true });
+    await writeFile(
+      path.join(sourcesDir, "index.md"),
+      "# 证据来源\n\n上一轮来源文件：/Users/weijian/Documents/private-export.json\n",
+    );
+    await writeFile(
+      path.join(sourcesDir, "source-evidence-stale.md"),
+      String.raw`---
+title: 旧来源
+---
+
+Windows 路径：C:\Users\weijian\Desktop\private.json
+`,
+    );
+
+    const result = await generatePersonalWikiFallback(
+      wikiRoot,
+      [lesson(refs[0], "历史页面中的本机路径必须自动隐藏。")],
+      "zh-CN",
+      stateRoot,
+    );
+
+    expect(result.report.valid).toBe(true);
+    const sourceIndex = await readFile(
+      path.join(sourcesDir, "index.md"),
+      "utf8",
+    );
+    const staleSource = await readFile(
+      path.join(sourcesDir, "source-evidence-stale.md"),
+      "utf8",
+    );
+    expect(sourceIndex).not.toMatch(/\/Users\/weijian\//u);
+    expect(staleSource).not.toMatch(/[A-Za-z]:\\Users\\weijian\\/u);
+    expect(staleSource).toContain("本地路径已隐藏");
   });
 
   test("blocks a batch-created page that cannot be traced to its candidates", async () => {
@@ -244,6 +337,41 @@ describe("personal wiki deterministic finalization", () => {
     expect(
       await readFile(path.join(wikiRoot, "open-questions.md"), "utf8"),
     ).toContain("open-questions/open-question-");
+  });
+
+  test("accepts escaped brackets in index link labels", async () => {
+    const { refs, stateRoot, wikiRoot } = await fixture();
+    const openQuestion: KnowledgeCandidate = {
+      ...lesson(refs[0], "论文编号需要后续通过原文核验。"),
+      stableKey: "hwj-wiki/openquestion/论文编号29",
+      title: "待核验论文 [29]：音乐推荐方法",
+      type: "OpenQuestion",
+    };
+    const sourceEvidence: KnowledgeCandidate = {
+      ...lesson(refs[1], "这组论文引用仍需逐篇核验。"),
+      stableKey: "hwj-wiki/sourceevidence/音乐情感论文14到21",
+      title: "音乐情感分析论文引用列表 [14]-[21]",
+      type: "SourceEvidence",
+    };
+
+    const result = await generatePersonalWikiFallback(
+      wikiRoot,
+      [openQuestion, sourceEvidence],
+      "zh-CN",
+      stateRoot,
+    );
+
+    expect(result.report.valid).toBe(true);
+    const openQuestionsIndex = await readFile(
+      path.join(wikiRoot, "open-questions", "index.md"),
+      "utf8",
+    );
+    const sourcesIndex = await readFile(
+      path.join(wikiRoot, "sources", "index.md"),
+      "utf8",
+    );
+    expect(openQuestionsIndex).toMatch(/\\\[29\\\]/u);
+    expect(sourcesIndex).toMatch(/\\\[14\\\]-\\\[21\\\]/u);
   });
 
   test("keeps identical titles separate across knowledge types", async () => {

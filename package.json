@@ -38,7 +38,7 @@
   ],
   "scripts": {
     "openwiki": "node dist/cli.js",
-    "build": "tsc -p tsconfig.json && tsc -p tsconfig.client.json",
+    "build": "tsc -p tsconfig.json && tsc -p tsconfig.client.json && node -e \"require('fs').chmodSync('dist/cli.js', 0o755)\"",
     "changeset:version": "changeset version",
     "clean": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\"",
     "coverage": "vitest run --coverage",
