@@ -1,4 +1,5 @@
 import { createGitRepoConnector } from "./sources/git-repo.js";
+import { createGatewayConnector } from "./sources/gateway.js";
 import { createGmailConnector } from "./sources/gmail.js";
 import { createHackerNewsConnector } from "./sources/hackernews.js";
 import { createLangSmithConnector } from "./sources/langsmith/index.js";
@@ -10,6 +11,7 @@ import type { ConnectorId, ConnectorRuntime } from "./types.js";
 
 export const CONNECTOR_IDS = [
   "git-repo",
+  "gateway",
   "notion",
   "x",
   "google",
@@ -25,6 +27,7 @@ export function createConnectorRegistry(): Record<
 > {
   return {
     "git-repo": createGitRepoConnector(),
+    gateway: createGatewayConnector(),
     google: createGmailConnector(),
     hackernews: createHackerNewsConnector(),
     langsmith: createLangSmithConnector(),

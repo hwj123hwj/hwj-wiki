@@ -371,6 +371,11 @@ export function createConnectorSynthesisGuidance(
   connector: ConnectorRuntime,
 ): string {
   switch (connector.id) {
+    case "gateway":
+      return `
+- Treat Gateway archives as private, sanitized evidence. Use request_id, conversation_id, session_id, timestamp, model, provider, status, usage, and source for provenance and deduplication.
+- Do not copy full request/response bodies into committed wiki pages. Extract durable decisions, technical lessons, commitments, and unresolved questions; keep raw archive paths as evidence references.
+- If an archive has truncated=true or a non-completed status, preserve that uncertainty and do not present the preview as a complete conversation.`;
     case "google":
       return `
 - For Gmail evidence, classify each candidate item before writing: action_required, scheduled_commitment, decision_or_approval, direct_request, important_update, people_or_org_signal, project_context, security_or_account_notice, newsletter_or_digest, transaction_or_receipt, promotion_or_marketing, personal_logistics, or noise.

@@ -71,6 +71,37 @@ describe("parseCommand — help", () => {
   });
 });
 
+describe("parseCommand — search", () => {
+  test("parses machine-readable unified knowledge search options", () => {
+    expect(
+      parseCommand([
+        "search",
+        "Gateway",
+        "archive",
+        "--json",
+        "--limit",
+        "5",
+        "--root",
+        "/tmp/agent-lessons",
+      ]),
+    ).toEqual({
+      kind: "search",
+      exitCode: 0,
+      json: true,
+      limit: 5,
+      query: "Gateway archive",
+      roots: ["/tmp/agent-lessons"],
+    });
+  });
+
+  test("rejects an empty or invalid search query", () => {
+    expect(parseCommand(["search"])).toMatchObject({ kind: "error" });
+    expect(parseCommand(["search", "gateway", "--limit", "0"])).toMatchObject({
+      kind: "error",
+    });
+  });
+});
+
 describe("parseCommand — chat default", () => {
   test("no args is an interactive chat that should not auto-start", () => {
     const result = parseCommand([]);

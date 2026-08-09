@@ -53,6 +53,7 @@ import {
   runOpenWikiIngestion,
   type OpenWikiIngestionResult,
 } from "./ingestion.js";
+import { searchKnowledge } from "./search.js";
 import {
   readOpenWikiOnboardingConfig,
   saveOpenWikiOnboardingConfig,
@@ -3770,6 +3771,7 @@ if (
   rawParsedCommand.kind === "auth" ||
   rawParsedCommand.kind === "cron" ||
   rawParsedCommand.kind === "ingest" ||
+  rawParsedCommand.kind === "search" ||
   rawParsedCommand.kind === "ngrok"
 ) {
   await loadOpenWikiEnv();
@@ -3803,6 +3805,8 @@ if (command.kind === "auth") {
   await runCronCommand(command);
 } else if (command.kind === "ingest") {
   await runIngestCommand(command);
+} else if (command.kind === "search") {
+  await runSearchCommand(command);
 } else if (command.kind === "visualize") {
   await runVisualizeCommand(command);
 } else if (shouldPrintStartupError(argv, parsedCommand, command)) {
@@ -4086,6 +4090,56 @@ async function runIngestCommand(
   } catch (error) {
     process.stderr.write(`${getErrorMessage(error)}\n`);
     writePrintErrorDiagnostics(error);
+    process.exitCode = 1;
+  }
+}
+
+async function runSearchCommand(
+  command: Extract<CliCommand, { kind: "search" }>,
+): Promise<void> {
+  try {
+    const results = await searchKnowledge(command.query, {
+      limit: command.limit,
+      roots: command.roots,
+    });
+    if (command.json) {
+      process.stdout.write(
+        JSON.stringify(
+          {
+            count: results.length,
+            query: command.query,
+            results,
+          },
+          null,
+          2,
+        ) + "\n",
+      );
+    } else {
+      process.stdout.write(
+        'Search "' + command.query + '" — ' + results.length + " result(s)\n\n",
+      );
+      for (const [index, result] of results.entries()) {
+        process.stdout.write(
+          String(index + 1) +
+            ". [" +
+            result.source +
+            "] " +
+            result.title +
+            " (" +
+            result.score +
+            ")\n" +
+            "   " +
+            result.path +
+            "\n" +
+            "   " +
+            result.snippet +
+            "\n\n",
+        );
+      }
+    }
+    process.exitCode = 0;
+  } catch (error) {
+    process.stderr.write(getErrorMessage(error) + "\n");
     process.exitCode = 1;
   }
 }

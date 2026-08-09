@@ -133,7 +133,7 @@ openwiki visualize openwiki --port 4400 --no-open
 
 ## Connect your sources
 
-In `personal` mode, OpenWiki ingests knowledge from the tools you already use, synthesizing them into your local wiki. First-run onboarding offers setup for **local git repositories, Notion, Gmail, X/Twitter, Web Search, and Hacker News**.
+In `personal` mode, OpenWiki ingests knowledge from the tools you already use, synthesizing them into your local wiki. First-run onboarding offers setup for **local git repositories, the LLM Gateway, Notion, Gmail, X/Twitter, Web Search, and Hacker News**.
 
 During an ingestion run, deterministic connector tools write raw data and manifests under `~/.openwiki/connectors/<connector>/raw/`, then source-specific agent runs synthesize the wiki under `~/.openwiki/wiki/`. You can configure the same connector more than once (for example one Web Search source for AI research and another for NBA news); OpenWiki stores them as separate instances like `web-search-1` and `web-search-2`.
 
@@ -141,6 +141,7 @@ During an ingestion run, deterministic connector tools write raw data and manife
 openwiki auth notion        # run a local browser OAuth flow for a provider
 openwiki ingest all         # run every configured source
 openwiki ingest web-search  # run one connector's sources
+openwiki ingest gateway     # import the next Gateway archive page
 ```
 
 <details>
@@ -154,6 +155,26 @@ openwiki ingest web-search  # run one connector's sources
 - `google` uses the Gmail API directly with OAuth user credentials to fetch recent mail.
 - `web-search` uses Tavily through LangChain and requires `TAVILY_API_KEY`.
 - `hackernews` uses the public Hacker News feed and search APIs, with no credentials required.
+- `gateway` reads the sanitized JSONL export from `/admin/archives/export`, stores raw connector data under `~/.openwiki/connectors/gateway/raw/`, and advances a durable cursor only after the raw page is written. It requires `OPENWIKI_GATEWAY_ADMIN_TOKEN` (the admin token is never put in connector config or generated wiki pages).
+
+For a local Gateway, the default endpoint is `http://127.0.0.1:4001`. To use another endpoint, set `OPENWIKI_GATEWAY_URL` or write a connector config without the secret:
+
+```sh
+export OPENWIKI_GATEWAY_URL="https://gateway.example.com"
+export OPENWIKI_GATEWAY_ADMIN_TOKEN="<admin-token>"
+mkdir -p ~/.openwiki/connectors/gateway
+cat > ~/.openwiki/connectors/gateway/config.json <<'JSON'
+{
+  "baseUrl": "https://gateway.example.com",
+  "adminTokenEnv": "OPENWIKI_GATEWAY_ADMIN_TOKEN",
+  "enabled": true,
+  "limit": 100
+}
+JSON
+openwiki ingest gateway
+```
+
+The connector can be attached to OpenWiki's existing recurring ingestion schedule through personal-mode onboarding. Failed requests and malformed export pages keep the previous cursor so the next run retries the same page.
 
 `openwiki auth <provider>` runs a local browser OAuth flow, saves returned tokens into `~/.openwiki/.env`, creates connector config when possible, and discovers MCP tools for MCP-backed providers. Slack and Gmail require app client credentials to already be set in that file; Notion uses dynamic client registration for hosted MCP; X uses OAuth 2.0 with PKCE. `openwiki auth configure <provider>` and `openwiki auth tools <provider>` are advanced retry commands.
 
@@ -402,8 +423,18 @@ openwiki --update                # update code docs (personal: openwiki personal
 openwiki visualize               # interactive graph + live reader
 openwiki auth <provider>         # authenticate a connector (slack, gmail, x, notion)
 openwiki ingest <source>         # run connector ingestion (all, or a connector/instance)
+openwiki search <query>          # deterministic unified Markdown knowledge search
 openwiki --help                  # full help
 ```
+
+`openwiki search` searches the generated personal wiki plus configured Markdown roots. Use `--json` for HwjCode or other agents, and `--root PATH` for an external knowledge repository such as agent-lessons:
+
+```sh
+OPENWIKI_AGENT_LESSONS_ROOT="$HOME/agent-lessons" \
+openwiki search "gateway archive" --json --limit 10
+```
+
+The search path is read-only and does not invoke a model. It skips connector `raw/` and private compiler-input directories, bounds file size, and redacts secret-like values from snippets.
 
 In chat, `/api-key` updates the current provider key and `/langsmith-key` updates or clears LangSmith tracing credentials, both with masked prompts.
 
