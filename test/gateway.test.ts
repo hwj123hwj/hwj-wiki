@@ -163,7 +163,9 @@ describe("gateway connector", () => {
     const connector = await loadConnector(home);
     const result = await connector.ingest();
     expect(result.status).toBe("success");
-    const raw = JSON.parse(await readFile(result.rawFiles[0] ?? "", "utf8")) as {
+    const raw = JSON.parse(
+      await readFile(result.rawFiles[0] ?? "", "utf8"),
+    ) as {
       archives: { request_id: string }[];
       excludedCount: number;
       fetchedCount: number;

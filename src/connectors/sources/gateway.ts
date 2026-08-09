@@ -194,7 +194,9 @@ async function ingest(
       fetchedArchives.length +
       " Gateway archive(s), retained " +
       archives.length +
-      (excludedCount > 0 ? " and excluded " + excludedCount + " agent feedback" : "") +
+      (excludedCount > 0
+        ? " and excluded " + excludedCount + " agent feedback"
+        : "") +
       (nextCursor
         ? " and advanced the export cursor."
         : " (cursor unchanged)."),
