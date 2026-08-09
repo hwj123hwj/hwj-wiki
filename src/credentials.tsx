@@ -35,6 +35,7 @@ import {
   OPENAI_CHATGPT_PLAN_ENV_KEY,
   OPENWIKI_GOOGLE_CLIENT_ID_ENV_KEY,
   OPENWIKI_GOOGLE_CLIENT_SECRET_ENV_KEY,
+  OPENWIKI_GATEWAY_ADMIN_TOKEN_ENV_KEY,
   OPENWIKI_MODEL_ID_ENV_KEY,
   OPENWIKI_PROVIDER_ENV_KEY,
   OPENWIKI_TAVILY_API_KEY_ENV_KEY,
@@ -240,6 +241,7 @@ const ONBOARDING_TEMPLATES = [
     name: "Personal",
     sourceIds: [
       "git-repo",
+      "gateway",
       "google",
       "notion",
       "web-search",
@@ -247,6 +249,7 @@ const ONBOARDING_TEMPLATES = [
       "x",
     ],
     suggestedSources: [
+      "LLM Gateway",
       "Gmail",
       "Notion",
       "Web Search (Tavily)",
@@ -335,6 +338,26 @@ const SOURCE_OPTIONS = [
     // No secret input: the LangSmith key is captured by the earlier `langsmith`
     // spine step (and provided as a CI secret), and used at pull time, not here.
     secretInputs: [],
+  },
+  {
+    displayName: "LLM Gateway",
+    examples: [
+      "Import sanitized Gateway conversations into the personal wiki.",
+      "Keep a cursor so recurring updates never duplicate or skip archives.",
+    ],
+    id: "gateway",
+    instructions: [
+      "Set the Gateway base URL in connector config when it is not http://127.0.0.1:4001.",
+      "Use an admin token that can read /admin/archives/export.",
+      "The token is saved only in the local OpenWiki environment file, never in connector config or the wiki.",
+    ],
+    secretInputs: [
+      {
+        envKey: OPENWIKI_GATEWAY_ADMIN_TOKEN_ENV_KEY,
+        label: "Gateway admin token",
+        secret: true,
+      },
+    ],
   },
   {
     authProvider: "notion",

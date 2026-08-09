@@ -55,6 +55,14 @@ export type CliCommand =
       target: IngestionTarget;
     }
   | {
+      kind: "search";
+      exitCode: 0;
+      json: boolean;
+      limit: number;
+      query: string;
+      roots: string[];
+    }
+  | {
       kind: "cron";
       action: "delete" | "list" | "pause" | "resume";
       exitCode: 0;
@@ -87,6 +95,85 @@ export type OpenWikiRunModeSource = "default" | "option" | "positional";
 export function parseCommand(argv: string[]): CliCommand {
   if (argv[0] === "--help" || argv[0] === "-h") {
     return { kind: "help", exitCode: 0 };
+  }
+
+  if (argv[0] === "search" || argv[0] === "knowledge") {
+    const queryParts: string[] = [];
+    const roots: string[] = [];
+    let json = false;
+    let limit = 10;
+    for (let index = 1; index < argv.length; index += 1) {
+      const arg = argv[index];
+      if (arg === "--json") {
+        json = true;
+        continue;
+      }
+      if (arg === "--limit") {
+        const rawLimit = argv[index + 1];
+        if (!rawLimit || rawLimit.startsWith("-")) {
+          return {
+            kind: "error",
+            exitCode: 1,
+            message: "--limit requires a positive integer.",
+          };
+        }
+        limit = Number(rawLimit);
+        index += 1;
+        continue;
+      }
+      if (arg.startsWith("--limit=")) {
+        limit = Number(arg.slice("--limit=".length));
+        continue;
+      }
+      if (arg === "--root") {
+        const root = argv[index + 1];
+        if (!root || root.startsWith("-")) {
+          return {
+            kind: "error",
+            exitCode: 1,
+            message: "--root requires a directory.",
+          };
+        }
+        roots.push(root);
+        index += 1;
+        continue;
+      }
+      if (arg.startsWith("--root=")) {
+        roots.push(arg.slice("--root=".length));
+        continue;
+      }
+      if (arg.startsWith("-")) {
+        return {
+          kind: "error",
+          exitCode: 1,
+          message: "Unknown option for search: " + arg,
+        };
+      }
+      queryParts.push(arg);
+    }
+    if (queryParts.length === 0) {
+      return {
+        kind: "error",
+        exitCode: 1,
+        message:
+          "Usage: openwiki search <query> [--json] [--limit N] [--root PATH]",
+      };
+    }
+    if (!Number.isInteger(limit) || limit <= 0 || limit > 100) {
+      return {
+        kind: "error",
+        exitCode: 1,
+        message: "--limit must be between 1 and 100.",
+      };
+    }
+    return {
+      kind: "search",
+      exitCode: 0,
+      json,
+      limit,
+      query: queryParts.join(" "),
+      roots,
+    };
   }
 
   if (argv[0] === "auth") {
@@ -743,6 +830,7 @@ export const helpContent: HelpContent = {
     "openwiki auth configure <provider> [--force]",
     "openwiki auth tools <provider>",
     "openwiki ingest <source|source-instance|all> [--scheduled] [--print] [--modelId <id>]",
+    "openwiki search <query> [--json] [--limit N] [--root PATH]",
     "openwiki cron list",
     "openwiki cron pause all",
     "openwiki cron resume all",
@@ -784,6 +872,11 @@ export const helpContent: HelpContent = {
       label: "openwiki ingest <source|source-instance|all>",
       description:
         "Run ingestion and wiki update runs for one connector, one source instance, or all configured sources.",
+    },
+    {
+      label: "openwiki search <query>",
+      description:
+        "Search the local OpenWiki pages and configured external Markdown knowledge roots.",
     },
     {
       label: "openwiki cron list",
@@ -853,6 +946,18 @@ export const helpContent: HelpContent = {
       label: "--scheduled",
       description:
         "For ingest only: run scheduled-only ingestion for scheduler-managed runs.",
+    },
+    {
+      label: "--json",
+      description: "For search: print machine-readable results.",
+    },
+    {
+      label: "--limit <N>",
+      description: "For search: cap the number of results (1-100).",
+    },
+    {
+      label: "--root <path>",
+      description: "For search: include another Markdown knowledge root.",
     },
     {
       label: "--telemetry-file <path>",

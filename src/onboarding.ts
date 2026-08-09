@@ -456,6 +456,7 @@ function normalizePowerManagementConfig(
 function isKnownConnectorId(value: string): value is ConnectorId {
   return (
     value === "git-repo" ||
+    value === "gateway" ||
     value === "google" ||
     value === "hackernews" ||
     value === "notion" ||
