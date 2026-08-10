@@ -2,9 +2,12 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { HumanMessage, SystemMessage } from "@langchain/core/messages";
-import { resolveConfiguredProvider } from "../constants.js";
+import { resolveConfiguredProvider } from "../config/constants.js";
 import { createModel } from "../agent/index.js";
-import { getConnectorDir, getConnectorRawDir } from "../openwiki-home.js";
+import {
+  getConnectorDir,
+  getConnectorRawDir,
+} from "../config/openwiki-home.js";
 import {
   PERSONAL_HISTORY_CONNECTOR_IDS,
   sanitizeImportedText,

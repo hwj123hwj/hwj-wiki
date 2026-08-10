@@ -1,5 +1,5 @@
 import { describe, expect, test, vi } from "vitest";
-import type { CliCommand } from "../src/commands.ts";
+import type { CliCommand } from "../src/cli/commands.js";
 import {
   applyPersonalWorkflowCommandDefaults,
   applyPersonalWorkflowEnvironmentDefaults,

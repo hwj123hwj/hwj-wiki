@@ -1,6 +1,6 @@
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
-import { openWikiLocalWikiDir } from "./openwiki-home.js";
+import { openWikiLocalWikiDir } from "./config/openwiki-home.js";
 
 export type KnowledgeSearchResult = {
   matchedTerms: string[];
