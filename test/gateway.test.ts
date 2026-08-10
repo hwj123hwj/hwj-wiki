@@ -129,6 +129,41 @@ describe("gateway connector", () => {
     );
   });
 
+  test("replays durable raw files until downstream synthesis acknowledges them", async () => {
+    const home = await createTempHome();
+    await writeGatewayConfig(home);
+    const fetchMock = vi.fn(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ id: 1, request_id: "one" }) + "\n", {
+          headers: {
+            "X-Archive-Next-Cursor": "2026-08-09T00:00:00Z,1",
+          },
+          status: 200,
+        }),
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const connector = await loadConnector(home);
+    const first = await connector.ingest({ retryPending: true });
+    expect(first.status).toBe("success");
+    expect(first.rawFiles).toHaveLength(1);
+
+    const retry = await connector.ingest({ retryPending: true });
+    expect(retry.status).toBe("success");
+    expect(retry.rawFiles).toEqual(first.rawFiles);
+    expect(retry.message).toContain("pending durable raw");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    const { acknowledgeConnectorRawFiles } =
+      await import("../src/connectors/io.ts");
+    await acknowledgeConnectorRawFiles("gateway", retry.rawFiles);
+
+    const next = await connector.ingest({ retryPending: true });
+    expect(next.status).toBe("success");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   test("filters OpenWiki agent feedback while preserving external archives", async () => {
     const home = await createTempHome();
     await writeGatewayConfig(home);

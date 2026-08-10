@@ -27,6 +27,7 @@ export type ConnectorIngestOptions = {
   instanceId?: string;
   limit?: number;
   repoRoot?: string;
+  retryPending?: boolean;
   streams?: string[];
   windowHours?: number;
 };
@@ -48,6 +49,7 @@ export type ConnectorRuntime = ConnectorDefinition & {
 export type ConnectorState = {
   lastRunAt?: string;
   latestIds?: Record<string, string>;
+  pendingRawFiles?: string[];
   runs?: ConnectorRunSummary[];
   version: 1;
 };
