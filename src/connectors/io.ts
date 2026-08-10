@@ -56,6 +56,28 @@ export async function writeConnectorState(
   await writePrivateJson(getConnectorStatePath(connectorId), state);
 }
 
+export async function acknowledgeConnectorRawFiles(
+  connectorId: ConnectorId,
+  rawFiles: string[],
+): Promise<void> {
+  if (rawFiles.length === 0) return;
+
+  const state = await readConnectorState(connectorId);
+  if (!state.pendingRawFiles?.length) return;
+
+  const acknowledged = new Set(rawFiles);
+  const remaining = state.pendingRawFiles.filter(
+    (filePath) => !acknowledged.has(filePath),
+  );
+  const nextState = { ...state };
+  if (remaining.length > 0) {
+    nextState.pendingRawFiles = remaining;
+  } else {
+    delete nextState.pendingRawFiles;
+  }
+  await writeConnectorState(connectorId, nextState);
+}
+
 export async function writeRawJson(
   connectorId: ConnectorId,
   runId: string,

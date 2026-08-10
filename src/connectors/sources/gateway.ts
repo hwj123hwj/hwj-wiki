@@ -78,6 +78,30 @@ async function ingest(
     });
   }
 
+  if (options.retryPending && state.pendingRawFiles?.length) {
+    const rawFiles = [...state.pendingRawFiles];
+    const nextState = updateStateWithRun(state, {
+      at: new Date().toISOString(),
+      rawFiles,
+      runId,
+      status: "success",
+      warnings,
+    });
+    await writeConnectorState("gateway", nextState);
+    return {
+      connectorId: "gateway",
+      message:
+        "Retrying " +
+        rawFiles.length +
+        " pending durable raw file(s) from an incomplete synthesis run.",
+      rawFiles,
+      runId,
+      statePath: "~/.openwiki/connectors/gateway/state.json",
+      status: "success",
+      warnings,
+    };
+  }
+
   const tokenEnv = normalizeTokenEnv(config.adminTokenEnv);
   const adminToken = process.env[tokenEnv];
   if (!adminToken) {
@@ -176,6 +200,10 @@ async function ingest(
       latestIds: nextCursor
         ? { ...(state.latestIds ?? {}), [CURSOR_KEY]: nextCursor }
         : state.latestIds,
+      pendingRawFiles:
+        rawFiles.length > 0
+          ? [...new Set([...(state.pendingRawFiles ?? []), ...rawFiles])]
+          : state.pendingRawFiles,
     },
     {
       at: new Date().toISOString(),

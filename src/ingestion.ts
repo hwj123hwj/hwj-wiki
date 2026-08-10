@@ -1,3 +1,4 @@
+import { acknowledgeConnectorRawFiles } from "./connectors/io.js";
 import {
   createConnectorRegistry,
   isConnectorId,
@@ -146,15 +147,17 @@ async function runSourceIngestion({
     `\nStarting ${getSourceDisplayName(connector, sourceConfig)} ingestion.\n`,
   );
 
+  let rawFiles: string[] = [];
   try {
     const deterministicPull = isDeterministicConnector(connector)
       ? await connector.ingest({
           connectorConfig: sourceConfig.connectorConfig,
           instanceId: sourceConfig.id,
+          retryPending: true,
           windowHours: INGESTION_WINDOW_HOURS,
         })
       : undefined;
-    const rawFiles = deterministicPull?.rawFiles ?? [];
+    rawFiles = deterministicPull?.rawFiles ?? [];
 
     if (
       deterministicPull &&
@@ -214,6 +217,7 @@ async function runSourceIngestion({
       telemetryContext,
       () => runOpenWikiAgent("update", cwd, runOptions, telemetryContext),
     );
+    await acknowledgeConnectorRawFiles(connector.id, rawFiles);
 
     return {
       agentResult,
@@ -230,7 +234,7 @@ async function runSourceIngestion({
     return {
       connectorId: connector.id,
       displayName: getSourceDisplayName(connector, sourceConfig),
-      rawFiles: [],
+      rawFiles,
       sourceInstanceId: sourceConfig.id,
       status: "error",
     };
