@@ -11,7 +11,7 @@ import {
   openWikiHomeDir,
   openWikiLocalWikiDir,
   resolveConnectorRawPath,
-} from "../openwiki-home.js";
+} from "../config/openwiki-home.js";
 import {
   PERSONAL_HISTORY_CONNECTOR_IDS,
   type PersonalHistoryConnectorId,

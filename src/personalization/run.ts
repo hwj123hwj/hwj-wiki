@@ -23,8 +23,8 @@ import {
   persistRunMetadataIfChanged,
 } from "../agent/utils.js";
 import { resolveModelId, runOpenWikiAgent } from "../agent/index.js";
-import { resolveConfiguredProvider } from "../constants.js";
-import { loadOpenWikiEnv } from "../env.js";
+import { resolveConfiguredProvider } from "../config/constants.js";
+import { loadOpenWikiEnv } from "../config/env.js";
 import type { RunTelemetryContext } from "../telemetry/index.js";
 import {
   acknowledgeCandidateReview,

@@ -1,7 +1,7 @@
 import {
   OPENWIKI_GATEWAY_ADMIN_TOKEN_ENV_KEY,
   OPENWIKI_GATEWAY_URL_ENV_KEY,
-} from "../../constants.js";
+} from "../../config/constants.js";
 import { fetchWithResilience } from "../http.js";
 import {
   createRunId,

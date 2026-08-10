@@ -10,7 +10,7 @@ import {
   resolveConceptTypeLabel,
   resolveIndexLabels,
 } from "../okf/index-labels.js";
-import { getConnectorRawDir } from "../openwiki-home.js";
+import { getConnectorRawDir } from "../config/openwiki-home.js";
 import {
   KNOWLEDGE_CANDIDATE_TYPES,
   KNOWLEDGE_CONFIDENCE_LEVELS,

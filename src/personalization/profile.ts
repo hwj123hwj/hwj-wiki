@@ -1,10 +1,10 @@
-import type { CliCommand } from "../commands.js";
+import type { CliCommand } from "../cli/commands.js";
 import {
   OPENAI_COMPATIBLE_API_KEY_ENV_KEY,
   OPENAI_COMPATIBLE_BASE_URL_ENV_KEY,
   OPENWIKI_MODEL_ID_ENV_KEY,
   OPENWIKI_PROVIDER_ENV_KEY,
-} from "../constants.js";
+} from "../config/constants.js";
 
 export const PERSONAL_DEFAULT_LANGUAGE = "zh-CN";
 export const PERSONAL_LITELLM_BASE_URL = "http://localhost:4001/v1";

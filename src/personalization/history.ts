@@ -14,13 +14,13 @@ import {
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { sanitizeDiagnosticText } from "../diagnostics.js";
+import { sanitizeDiagnosticText } from "../platform/diagnostics.js";
 import {
   ensureConnectorHome,
   getConnectorDir,
   getConnectorRawDir,
   openWikiConnectorsDir,
-} from "../openwiki-home.js";
+} from "../config/openwiki-home.js";
 
 const execFileAsync = promisify(execFile);
 const MAX_RECORD_TEXT_BYTES = 50_000;
