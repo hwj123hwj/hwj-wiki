@@ -1140,6 +1140,15 @@ export function getStaticSourceConfig(
     };
   }
 
+  if (sourceId === "internal") {
+    return {
+      enabled: true,
+      maxItems: 200,
+      rootDir: "~/.openwiki/internal-sources",
+      sources: ["google", "slack", "notion"],
+    };
+  }
+
   return {
     enabled: true,
   };

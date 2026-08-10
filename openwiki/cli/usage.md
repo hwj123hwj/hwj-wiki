@@ -37,6 +37,7 @@ From `src/commands.ts` and `README.md`, the supported entry patterns are:
 - `openwiki cron resume <source|all>` — reinstall paused launchd job(s) and reconcile `pmset` wake window.
 - `openwiki cron delete <source|all>` — unload and remove schedule metadata (does not remove auth, config, raw data, or wiki content).
 - `openwiki ingest [target]` — run source-specific ingestion for configured connectors.
+- `openwiki ingest internal` — consume the local no-OAuth JSONL feeds from our internal systems after an `internal` source instance is configured.
 
 The parser rejects incompatible combinations such as `--init` and `--update` together, and it requires a message or command when `--print` is used.
 

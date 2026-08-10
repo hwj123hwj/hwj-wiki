@@ -31,6 +31,7 @@ export const ONBOARDING_TEMPLATES = [
     sourceIds: [
       "git-repo",
       "gateway",
+      "internal",
       "google",
       "notion",
       "web-search",
@@ -39,6 +40,7 @@ export const ONBOARDING_TEMPLATES = [
     ],
     suggestedSources: [
       "LLM Gateway",
+      "Internal system sources",
       "Gmail",
       "Notion",
       "Web Search (Tavily)",
@@ -135,6 +137,20 @@ export const SOURCE_OPTIONS = [
         secret: true,
       },
     ],
+  },
+  {
+    displayName: "Internal system sources",
+    examples: [
+      "Import sanitized Gmail, Slack, and Notion events from our internal systems.",
+      "Merge internal product conversations and decisions into the personal wiki.",
+    ],
+    id: "internal",
+    instructions: [
+      "No Gmail, Slack, or Notion OAuth is required.",
+      "Your internal systems should append sanitized JSONL events under ~/.openwiki/internal-sources.",
+      "The default streams are google, slack, and notion; you can edit the connector config for additional internal streams.",
+    ],
+    secretInputs: [],
   },
   {
     authProvider: "notion",

@@ -79,6 +79,7 @@ describe("createConnectorSynthesisGuidance per connector", () => {
     "git-repo": "Use repository paths, branches, HEADs",
     google: "For Gmail evidence, classify each candidate item",
     hackernews: "Treat low-engagement Hacker News items as watchlist",
+    internal: "Internal system events are already sanitized",
     gateway: "Treat Gateway archives as private",
     langsmith: "openwiki_read_raw_item",
     notion: "Prefer Notion pages edited in the ingestion window",

@@ -3,6 +3,7 @@ export type ConnectorId =
   | "gateway"
   | "google"
   | "hackernews"
+  | "internal"
   | "langsmith"
   | "notion"
   | "slack"
@@ -10,7 +11,7 @@ export type ConnectorId =
   | "x";
 
 export type ConnectorBackend =
-  "direct-api" | "local-git" | "mcp-http" | "mcp-stdio";
+  "direct-api" | "internal-file" | "local-git" | "mcp-http" | "mcp-stdio";
 
 export type ConnectorDefinition = {
   backend: ConnectorBackend;
