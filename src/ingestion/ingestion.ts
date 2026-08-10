@@ -29,11 +29,7 @@ import {
   withRunTelemetry,
   type RunTelemetryContext,
 } from "../telemetry/index.js";
-import {
-  applyPersonalWorkflowEnvironmentDefaults,
-  PERSONAL_DEFAULT_LANGUAGE,
-  verifyPersonalLiteLlmGateway,
-} from "../personalization/profile.js";
+import { PERSONAL_DEFAULT_LANGUAGE } from "../personalization/profile.js";
 
 const INGESTION_WINDOW_HOURS = 24;
 
@@ -72,8 +68,6 @@ export async function runOpenWikiIngestion(
 ): Promise<OpenWikiIngestionResult> {
   void _cwd;
   await loadOpenWikiEnv();
-  applyPersonalWorkflowEnvironmentDefaults();
-  await verifyPersonalLiteLlmGateway();
   await ensureOpenWikiHome();
   const config = await readOpenWikiOnboardingConfig();
   const registry = createConnectorRegistry();
