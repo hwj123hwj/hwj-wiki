@@ -175,6 +175,18 @@ async function runSourceIngestion({
       };
     }
 
+    if (deterministicPull?.status === "skipped") {
+      emitDeterministicPullSummary(emit, deterministicPull);
+      return {
+        connectorId: connector.id,
+        deterministicPull,
+        displayName: getSourceDisplayName(connector, sourceConfig),
+        rawFiles,
+        sourceInstanceId: sourceConfig.id,
+        status: "skipped",
+      };
+    }
+
     emitDeterministicPullSummary(emit, deterministicPull);
 
     const runOptions: OpenWikiRunOptions = {

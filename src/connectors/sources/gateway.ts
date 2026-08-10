@@ -22,6 +22,7 @@ type GatewayConfig = {
   adminTokenEnv?: string;
   baseUrl?: string;
   enabled?: boolean;
+  excludeSources?: string[];
   limit?: number;
 };
 
@@ -56,6 +57,7 @@ async function ingest(
       adminTokenEnv: OPENWIKI_GATEWAY_ADMIN_TOKEN_ENV_KEY,
       baseUrl: process.env[OPENWIKI_GATEWAY_URL_ENV_KEY] ?? DEFAULT_GATEWAY_URL,
       enabled: true,
+      excludeSources: ["hwj-wiki-agent"],
       limit: DEFAULT_LIMIT,
     })),
     ...((options.connectorConfig ?? {}) as GatewayConfig),
@@ -101,7 +103,7 @@ async function ingest(
   }
 
   let response: Response;
-  let archives: Record<string, unknown>[];
+  let fetchedArchives: Record<string, unknown>[];
   try {
     response = await fetchWithResilience(url, {
       headers: {
@@ -123,7 +125,7 @@ async function ingest(
         warnings,
       });
     }
-    archives = parseJsonLines(await response.text());
+    fetchedArchives = parseJsonLines(await response.text());
   } catch (error) {
     return finishRun({
       message:
@@ -140,19 +142,34 @@ async function ingest(
   const schemaVersion = Number(
     response.headers.get("X-Archive-Schema-Version") ?? "0",
   );
-
-  rawFiles.push(
-    await writeRawJson("gateway", runId, "gateway-archives.json", {
-      fetchedAt: new Date().toISOString(),
-      instanceId: options.instanceId,
-      limit,
-      nextCursor: nextCursor || undefined,
-      previousCursor: since || undefined,
-      archives,
-      schemaVersion: Number.isFinite(schemaVersion) ? schemaVersion : undefined,
-    }),
+  const excludedSources = normalizeExcludedSources(config.excludeSources);
+  const archives = fetchedArchives.filter(
+    (archive) =>
+      !excludedSources.has(
+        typeof archive.source === "string" ? archive.source.trim() : "",
+      ),
   );
+  const excludedCount = fetchedArchives.length - archives.length;
 
+  if (archives.length > 0) {
+    rawFiles.push(
+      await writeRawJson("gateway", runId, "gateway-archives.json", {
+        fetchedAt: new Date().toISOString(),
+        instanceId: options.instanceId,
+        limit,
+        nextCursor: nextCursor || undefined,
+        previousCursor: since || undefined,
+        archives,
+        excludedCount,
+        fetchedCount: fetchedArchives.length,
+        schemaVersion: Number.isFinite(schemaVersion)
+          ? schemaVersion
+          : undefined,
+      }),
+    );
+  }
+
+  const status = archives.length > 0 ? "success" : "skipped";
   const nextState = updateStateWithRun(
     {
       ...state,
@@ -164,7 +181,7 @@ async function ingest(
       at: new Date().toISOString(),
       rawFiles,
       runId,
-      status: "success",
+      status,
       warnings,
     },
   );
@@ -174,15 +191,19 @@ async function ingest(
     connectorId: "gateway",
     message:
       "Fetched " +
+      fetchedArchives.length +
+      " Gateway archive(s), retained " +
       archives.length +
-      " Gateway archive(s)" +
+      (excludedCount > 0
+        ? " and excluded " + excludedCount + " agent feedback"
+        : "") +
       (nextCursor
         ? " and advanced the export cursor."
         : " (cursor unchanged)."),
     rawFiles,
     runId,
     statePath: "~/.openwiki/connectors/gateway/state.json",
-    status: "success",
+    status,
     warnings,
   };
 }
@@ -245,6 +266,16 @@ function normalizeTokenEnv(value: unknown): string {
   return typeof value === "string" && /^[A-Z][A-Z0-9_]{0,127}$/u.test(value)
     ? value
     : OPENWIKI_GATEWAY_ADMIN_TOKEN_ENV_KEY;
+}
+
+function normalizeExcludedSources(value: unknown): Set<string> {
+  if (!Array.isArray(value)) return new Set(["hwj-wiki-agent"]);
+  return new Set(
+    value
+      .filter((source): source is string => typeof source === "string")
+      .map((source) => source.trim())
+      .filter(Boolean),
+  );
 }
 
 function parseJsonLines(body: string): Record<string, unknown>[] {

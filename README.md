@@ -156,6 +156,7 @@ openwiki ingest gateway     # import the next Gateway archive page
 - `web-search` uses Tavily through LangChain and requires `TAVILY_API_KEY`.
 - `hackernews` uses the public Hacker News feed and search APIs, with no credentials required.
 - `gateway` reads the sanitized JSONL export from `/admin/archives/export`, stores raw connector data under `~/.openwiki/connectors/gateway/raw/`, and advances a durable cursor only after the raw page is written. It requires `OPENWIKI_GATEWAY_ADMIN_TOKEN` (the admin token is never put in connector config or generated wiki pages).
+- OpenWiki model requests are tagged as `hwj-wiki-agent`; the Gateway connector excludes that source by default and skips synthesis when no external archives remain, preventing recursive self-ingestion.
 
 For a local Gateway, the default endpoint is `http://127.0.0.1:4001`. To use another endpoint, set `OPENWIKI_GATEWAY_URL` or write a connector config without the secret:
 

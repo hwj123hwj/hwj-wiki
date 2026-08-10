@@ -113,7 +113,8 @@ describe("gateway connector", () => {
     expect(raw.schemaVersion).toBe(2);
 
     const second = await connector.ingest();
-    expect(second.status).toBe("success");
+    expect(second.status).toBe("skipped");
+    expect(second.rawFiles).toEqual([]);
     expect(new URL(requests[1] ?? "").searchParams.get("since")).toBe(
       "2026-08-09T00:00:00Z,2",
     );
@@ -126,6 +127,97 @@ describe("gateway connector", () => {
     expect(state.latestIds["gateway-export-cursor"]).toBe(
       "2026-08-09T00:00:00Z,2",
     );
+  });
+
+  test("filters OpenWiki agent feedback while preserving external archives", async () => {
+    const home = await createTempHome();
+    await writeGatewayConfig(home);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(
+            [
+              JSON.stringify({
+                id: 1,
+                request_id: "self",
+                source: "hwj-wiki-agent",
+              }),
+              JSON.stringify({
+                id: 2,
+                request_id: "external",
+                source: "hwjcode",
+              }),
+            ].join("\n") + "\n",
+            {
+              headers: {
+                "X-Archive-Next-Cursor": "2026-08-09T00:00:00Z,2",
+              },
+              status: 200,
+            },
+          ),
+        ),
+      ),
+    );
+
+    const connector = await loadConnector(home);
+    const result = await connector.ingest();
+    expect(result.status).toBe("success");
+    const raw = JSON.parse(
+      await readFile(result.rawFiles[0] ?? "", "utf8"),
+    ) as {
+      archives: { request_id: string }[];
+      excludedCount: number;
+      fetchedCount: number;
+    };
+    expect(raw.archives.map((archive) => archive.request_id)).toEqual([
+      "external",
+    ]);
+    expect(raw.fetchedCount).toBe(2);
+    expect(raw.excludedCount).toBe(1);
+  });
+
+  test("advances the cursor without raw output when a page is only agent feedback", async () => {
+    const home = await createTempHome();
+    await writeGatewayConfig(home);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify({
+              id: 1,
+              request_id: "self",
+              source: "hwj-wiki-agent",
+            }) + "\n",
+            {
+              headers: {
+                "X-Archive-Next-Cursor": "2026-08-09T00:00:00Z,1",
+              },
+              status: 200,
+            },
+          ),
+        ),
+      ),
+    );
+
+    const connector = await loadConnector(home);
+    const result = await connector.ingest();
+    expect(result.status).toBe("skipped");
+    expect(result.rawFiles).toEqual([]);
+    const state = JSON.parse(
+      await readFile(
+        path.join(home, ".openwiki", "connectors", "gateway", "state.json"),
+        "utf8",
+      ),
+    ) as {
+      latestIds: Record<string, string>;
+      runs: Array<{ status: string }>;
+    };
+    expect(state.latestIds["gateway-export-cursor"]).toBe(
+      "2026-08-09T00:00:00Z,1",
+    );
+    expect(state.runs.at(-1)?.status).toBe("skipped");
   });
 
   test("reports missing credentials without advancing state", async () => {

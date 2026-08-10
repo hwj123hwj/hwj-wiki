@@ -139,6 +139,25 @@ describe("createModel gemini (AI Studio)", () => {
 });
 
 describe("createModel OpenAI-compatible transport selection", () => {
+  test("marks OpenWiki requests so Gateway ingestion can exclude feedback", () => {
+    const savedKey = process.env.OPENAI_COMPATIBLE_API_KEY;
+    const savedBaseUrl = process.env.OPENAI_COMPATIBLE_BASE_URL;
+    process.env.OPENAI_COMPATIBLE_API_KEY = "test-key";
+    process.env.OPENAI_COMPATIBLE_BASE_URL = "http://gateway.test/v1";
+
+    try {
+      const model = createModel("openai-compatible", "qwen3.8-max", 0) as {
+        clientConfig?: { defaultHeaders?: Record<string, string> };
+      };
+      expect(model.clientConfig?.defaultHeaders?.["X-AI-Source"]).toBe(
+        "hwj-wiki-agent",
+      );
+    } finally {
+      restoreEnv("OPENAI_COMPATIBLE_API_KEY", savedKey);
+      restoreEnv("OPENAI_COMPATIBLE_BASE_URL", savedBaseUrl);
+    }
+  });
+
   test("routes Copilot GPT-5 models through the Responses API", () => {
     const model = createModel("copilot", "gpt-5.5", 0) as {
       useResponsesApi?: boolean;

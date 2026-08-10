@@ -1139,12 +1139,17 @@ export function createModel(
   }
 
   const baseURL = resolveProviderBaseUrl(provider);
+  const gatewaySource =
+    process.env.OPENWIKI_GATEWAY_SOURCE?.trim() || "hwj-wiki-agent";
 
   return new ChatOpenAI({
     apiKey: getProviderApiKey(provider),
     configuration: baseURL
       ? {
           baseURL,
+          ...(provider === "openai-compatible"
+            ? { defaultHeaders: { "X-AI-Source": gatewaySource } }
+            : {}),
         }
       : undefined,
     model: modelId,
