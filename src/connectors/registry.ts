@@ -2,6 +2,7 @@ import { createGitRepoConnector } from "./sources/git-repo.js";
 import { createGatewayConnector } from "./sources/gateway.js";
 import { createGmailConnector } from "./sources/gmail.js";
 import { createHackerNewsConnector } from "./sources/hackernews.js";
+import { createInternalConnector } from "./sources/internal.js";
 import { createLangSmithConnector } from "./sources/langsmith/index.js";
 import { createMcpConnector } from "./sources/mcp.js";
 import { createSlackConnector } from "./sources/slack.js";
@@ -12,6 +13,7 @@ import type { ConnectorId, ConnectorRuntime } from "./types.js";
 export const CONNECTOR_IDS = [
   "git-repo",
   "gateway",
+  "internal",
   "notion",
   "x",
   "google",
@@ -30,6 +32,7 @@ export function createConnectorRegistry(): Record<
     gateway: createGatewayConnector(),
     google: createGmailConnector(),
     hackernews: createHackerNewsConnector(),
+    internal: createInternalConnector(),
     langsmith: createLangSmithConnector(),
     notion: createMcpConnector({
       description:

@@ -74,6 +74,7 @@ describe("connector tool definitions", () => {
       "git-repo",
       "google",
       "hackernews",
+      "internal",
       "notion",
       "slack",
       "web-search",

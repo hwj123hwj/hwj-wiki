@@ -72,6 +72,12 @@ Hacker News uses public read-only APIs and does not require credentials. The
 connector can fetch top/new/best/show/ask/job feeds and configured search
 queries.
 
+For our internal Gmail, Slack, and Notion integrations, use the `internal`
+connector instead of these OAuth flows. Internal services push sanitized JSONL
+events to `~/.openwiki/internal-sources/google.jsonl`, `slack.jsonl`, or
+`notion.jsonl`; `openwiki ingest internal` consumes them with a durable cursor.
+No third-party authorization is performed by OpenWiki for this path.
+
 `src/credentials.tsx` provides the interactive bootstrap flow when required:
 
 - prompts for a provider (arrow-key selection menu),

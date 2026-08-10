@@ -385,7 +385,12 @@ export function createConnectorSynthesisGuidance(
       return `
 - Treat Gateway archives as private, sanitized evidence. Use request_id, conversation_id, session_id, timestamp, model, provider, status, usage, and source for provenance and deduplication.
 - Do not copy full request/response bodies into committed wiki pages. Extract durable decisions, technical lessons, commitments, and unresolved questions; keep raw archive paths as evidence references.
-- If an archive has truncated=true or a non-completed status, preserve that uncertainty and do not present the preview as a complete conversation.`;
+      - If an archive has truncated=true or a non-completed status, preserve that uncertainty and do not present the preview as a complete conversation.`;
+    case "internal":
+      return `
+- Internal system events are already sanitized and pulled from the local JSONL bridge; do not call Gmail, Slack, or Notion APIs and do not request OAuth.
+- Treat google as Gmail-origin evidence, slack as Slack-origin evidence, and notion as Notion-origin evidence. Preserve the source, stable id, timestamp/updatedAt, and inputPath for provenance and deduplication.
+- Route durable decisions, direct requests, approvals, deadlines, and follow-ups to /commitments.md with Owner when inferable; keep ordinary chatter out of canonical pages. Keep /sources/internal.md as a compact cross-source evidence index and use the original source label in each entry.`;
     case "google":
       return `
 - For Gmail evidence, classify each candidate item before writing: action_required, scheduled_commitment, decision_or_approval, direct_request, important_update, people_or_org_signal, project_context, security_or_account_notice, newsletter_or_digest, transaction_or_receipt, promotion_or_marketing, personal_logistics, or noise.

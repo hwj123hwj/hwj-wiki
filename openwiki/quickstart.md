@@ -30,7 +30,7 @@ OpenWiki is a TypeScript CLI that writes and maintains documentation for a repos
 - [CLI usage](./cli/usage.md) — commands, options, model/provider selection, and credential bootstrap.
 - [Agent workflow](./agent/workflow.md) — how documentation runs are assembled and persisted.
 - [Credentials and updates](./operations/credentials-and-updates.md) — local env storage, metadata, and scheduled updates.
-- [Connectors](./integrations/connectors.md) — built-in connector architecture, the eight connectors, and ingestion orchestration.
+- [Connectors](./integrations/connectors.md) — built-in connector architecture, the nine connectors, and ingestion orchestration.
 - [DeepSWE evaluation harness](./evals/deepswe-harness.md) — paired DeepSWE benchmark harness that measures OpenWiki's documentation leverage on Codex.
 
 ## Key source files
@@ -66,7 +66,7 @@ OpenWiki is a TypeScript CLI that writes and maintains documentation for a repos
 - `src/mermaid/` — Mermaid fence extraction, validation, and wiki repair.
 - `src/telemetry/` — anonymous usage telemetry with PostHog, opt-out, CI sentinel IDs, error classification/fingerprinting, and a baked-in `build_channel` stamp.
 - `scripts/stamp-build-channel.cjs` — release-only build-time rewrite of `BUILD_CHANNEL` in `src/telemetry/gates.ts` from `"community"` to `"official"` for npm-published upstream builds, driven by `OPENWIKI_BUILD_CHANNEL` in `.github/workflows/release.yml`.
-- `src/connectors/` — connector registry, MCP client/runtime, source-specific ingestion (git-repo, gmail, hackernews, langsmith, slack, web-search, x), and tool definitions.
+- `src/connectors/` — connector registry, MCP client/runtime, source-specific ingestion (git-repo, internal, gmail, hackernews, langsmith, slack, web-search, x), and tool definitions.
 - `src/ingestion.ts` — orchestrates source ingestion runs across configured connectors.
 - `src/code-mode.ts` — `openwiki code` setup: creates the GitHub Actions workflow only when missing (preserving customizations on update) and refreshes AGENTS.md/CLAUDE.md snippets.
 - `src/env.ts` — `~/.openwiki/.env` persistence and credential diagnostics.

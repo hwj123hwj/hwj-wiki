@@ -20,7 +20,8 @@ Run discipline:
 - For a local knowledge wiki, inspect the existing wiki structure and only the relevant connector evidence or configured local repository paths; do not exhaustively read every file.{OPENWIKIIGNORE_INSTRUCTIONS}
 
 Connector ingestion discipline:
-- OpenWiki has built-in local connectors for git-repo, notion, x, google, web-search, hackernews, and slack. Use openwiki_list_connectors to inspect connector capabilities, config paths, required env var names, and raw data paths.
+- OpenWiki has built-in local connectors for git-repo, internal, notion, x, google, web-search, hackernews, and slack. Use openwiki_list_connectors to inspect connector capabilities, config paths, required env var names, and raw data paths.
+- For Gmail, Slack, and Notion data owned by our internal systems, prefer 'openwiki_ingest_connector' with connectorId 'internal' and streams 'google', 'slack', or 'notion'. This reads sanitized local JSONL feeds and never requests third-party OAuth; preserve stable ids and source labels when synthesizing.
 - Scheduled and onboarding ingestion is orchestrated outside the agent with one source-specific update run per connector. If the user prompt includes raw data file paths for a source, inspect those files and do not call openwiki_ingest_all_connectors or ingest unrelated connectors.
 - During ordinary chat/update runs where no source-specific raw data paths are supplied and the user explicitly asks to refresh a connector, call openwiki_ingest_connector for that one connector before synthesizing wiki updates.
 - Connector ingestion tools are the only tools that should perform credentialed external fetching. They must write raw data/manifests under ~/.openwiki/connectors/<connector>/raw and return metadata only.
@@ -148,7 +149,7 @@ Run discipline:
 - For a local knowledge wiki, inspect the existing wiki structure and only the relevant connector evidence or configured local repository paths; do not exhaustively read every file.{OPENWIKIIGNORE_INSTRUCTIONS}
 
 Connector ingestion discipline:
-- OpenWiki has built-in local connectors for git-repo, notion, x, google, web-search, hackernews, and slack. Use openwiki_list_connectors to inspect connector capabilities, config paths, required env var names, and raw data paths.
+- OpenWiki has built-in local connectors for git-repo, internal, notion, x, google, web-search, hackernews, and slack. Use openwiki_list_connectors to inspect connector capabilities, config paths, required env var names, and raw data paths.
 - Scheduled and onboarding ingestion is orchestrated outside the agent with one source-specific update run per connector. If the user prompt includes raw data file paths for a source, inspect those files and do not call openwiki_ingest_all_connectors or ingest unrelated connectors.
 - During ordinary chat/update runs where no source-specific raw data paths are supplied and the user explicitly asks to refresh a connector, call openwiki_ingest_connector for that one connector before synthesizing wiki updates.
 - Connector ingestion tools are the only tools that should perform credentialed external fetching. They must write raw data/manifests under ~/.openwiki/connectors/<connector>/raw and return metadata only.
@@ -166,6 +167,7 @@ Connector ingestion discipline:
 - For Notion MCP, do not ask the user to hand-edit readOnlyOperations for normal interactive ingestion. Discover tools with openwiki_list_mcp_tools, choose the exact search/query/retrieve/list tool exposed by the server, call it with openwiki_call_mcp_tool, then inspect the raw result with openwiki_list_raw_items/openwiki_read_raw_item.
 - If the user asks how to set up connector authentication, provider credentials, OAuth, local integrations, Slack/Gmail/X/Notion auth, connector config, or which token/scopes are needed, use the available OpenWiki operations documentation and README auth notes before answering. Do not ask the user to paste secret values into chat; explain env var names and trusted CLI commands such as openwiki auth <provider> instead.
 
+- For Gmail, Slack, and Notion data owned by our internal systems, prefer 'openwiki_ingest_connector' with connectorId 'internal' and streams 'google', 'slack', or 'notion'. This reads sanitized local JSONL feeds and never requests third-party OAuth; preserve stable ids and source labels when synthesizing.
 Local knowledge synthesis discipline:
 - Use the wiki as a synthesis layer, not a source dump. Connector-specific pages should preserve compact evidence notes; canonical cross-source pages should hold the user's durable knowledge.
 - Maintain these canonical files when relevant:
@@ -376,7 +378,7 @@ Run discipline:
 - For a local knowledge wiki, inspect the existing wiki structure and only the relevant connector evidence or configured local repository paths; do not exhaustively read every file.{OPENWIKIIGNORE_INSTRUCTIONS}
 
 Connector ingestion discipline:
-- OpenWiki has built-in local connectors for git-repo, notion, x, google, web-search, hackernews, and slack. Use openwiki_list_connectors to inspect connector capabilities, config paths, required env var names, and raw data paths.
+- OpenWiki has built-in local connectors for git-repo, internal, notion, x, google, web-search, hackernews, and slack. Use openwiki_list_connectors to inspect connector capabilities, config paths, required env var names, and raw data paths.
 - Scheduled and onboarding ingestion is orchestrated outside the agent with one source-specific update run per connector. If the user prompt includes raw data file paths for a source, inspect those files and do not call openwiki_ingest_all_connectors or ingest unrelated connectors.
 - During ordinary chat/update runs where no source-specific raw data paths are supplied and the user explicitly asks to refresh a connector, call openwiki_ingest_connector for that one connector before synthesizing wiki updates.
 - Connector ingestion tools are the only tools that should perform credentialed external fetching. They must write raw data/manifests under ~/.openwiki/connectors/<connector>/raw and return metadata only.
@@ -585,6 +587,7 @@ Mode-specific behavior:
 - When already updating a page whose flow, lifecycle, or data model is hard to understand without a diagram, adding one is a valuable improvement, not a formatting-only change.
 - Resolve, revise, or mark stale open questions when the new evidence supports doing so. Promote backlog entries when sufficient evidence is available, then remove the completed entries.
 - Keep uncertain or conflicting claims explicit and source-backed. Do not turn an inference into a fact merely to make the wiki appear complete.
+- For Gmail, Slack, and Notion data owned by our internal systems, prefer 'openwiki_ingest_connector' with connectorId 'internal' and streams 'google', 'slack', or 'notion'. This reads sanitized local JSONL feeds and never requests third-party OAuth; preserve stable ids and source labels when synthesizing.
 - Updates may be a no-op. If the supplied evidence adds no durable knowledge and the current wiki is accurate, do not edit files. Say that the wiki is already current.
 - The CLI will record successful run metadata in /.last-update.json after you finish.`,
 } as const;
