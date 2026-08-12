@@ -15,11 +15,11 @@ import {
   type PersonalHistoryRecord,
 } from "./history.js";
 
-// Keep the client deadline below the gateway's 120 s upstream deadline. A
-// timed-out large request can then be split and retried instead of making the
-// whole personal run appear frozen for two minutes before the gateway returns
-// 503.
-const DEFAULT_EXTRACTION_TIMEOUT_MS = 60_000;
+// Candidate requests can contain long reasoning traces. Keep the deadline
+// bounded, but do not bake in the gateway's historical 120-second limit: the
+// gateway provider timeout is configurable per provider and the local client
+// must leave enough room for a valid long-running request to finish.
+const DEFAULT_EXTRACTION_TIMEOUT_MS = 300_000;
 // Candidate extraction already has its own bounded retry/split policy below.
 // Reusing the global LangChain retry budget here causes one aborted gateway
 // request to be retried inside the model client and then retried again by the

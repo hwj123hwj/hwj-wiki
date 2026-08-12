@@ -17,7 +17,9 @@ Pi、Codex、Antigravity、豆包轮询处理到 backlog 清空，但每次模�
 只消费结构化候选，并执行同一套 OKF、索引、断链、去重、来源和敏感信息检查；
 降级页面进入独立复核队列，复核完成前不会误报 `complete`。个人候选提取默认关闭
 模型客户端的额外重试，由适配层统一控制分片和重试，避免网关抖动被多层重试放大；
-确实需要时可设置 `OPENWIKI_PERSONAL_EXTRACTION_PROVIDER_RETRIES`（非负整数）。
+单次提取截止时间默认为 300000ms，也可通过
+`OPENWIKI_PERSONAL_EXTRACTION_TIMEOUT_MS` 调整；确实需要时可设置
+`OPENWIKI_PERSONAL_EXTRACTION_PROVIDER_RETRIES`（非负整数）。
 
 ```bash
 npm install --global hwj-wiki
