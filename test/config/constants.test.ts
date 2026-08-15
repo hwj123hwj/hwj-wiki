@@ -29,6 +29,8 @@ import {
   providerRequiresSecretKey,
   providerUsesAwsSdkCredentials,
   resolveConfiguredProvider,
+  resolveOpenAiCompatibleUseResponsesApi,
+  resolveOpenRouterMaxTokens,
   resolveOpenRouterProviderOnly,
   resolveProviderBaseUrl,
   resolveProviderLocation,
@@ -308,6 +310,53 @@ describe("resolveOpenRouterProviderOnly", () => {
         OPENWIKI_OPENROUTER_PROVIDER_ONLY: "Novita, Fireworks,, Together",
       }),
     ).toEqual(["Novita", "Fireworks", "Together"]);
+  });
+});
+
+describe("resolveOpenAiCompatibleUseResponsesApi", () => {
+  test("defaults to chat completions compatibility", () => {
+    expect(resolveOpenAiCompatibleUseResponsesApi({})).toBe(false);
+  });
+
+  test("only enables responses API for an explicit true opt-in", () => {
+    expect(
+      resolveOpenAiCompatibleUseResponsesApi({
+        OPENWIKI_OPENAI_COMPATIBLE_USE_RESPONSES_API: "true",
+      }),
+    ).toBe(true);
+    expect(
+      resolveOpenAiCompatibleUseResponsesApi({
+        OPENWIKI_OPENAI_COMPATIBLE_USE_RESPONSES_API: " TRUE ",
+      }),
+    ).toBe(true);
+    expect(
+      resolveOpenAiCompatibleUseResponsesApi({
+        OPENWIKI_OPENAI_COMPATIBLE_USE_RESPONSES_API: "false",
+      }),
+    ).toBe(false);
+  });
+});
+
+describe("resolveOpenRouterMaxTokens", () => {
+  test("returns undefined when no cap is configured", () => {
+    expect(resolveOpenRouterMaxTokens({})).toBeUndefined();
+  });
+
+  test("parses a positive integer cap", () => {
+    expect(
+      resolveOpenRouterMaxTokens({ OPENWIKI_OPENROUTER_MAX_TOKENS: "4096" }),
+    ).toBe(4096);
+    expect(
+      resolveOpenRouterMaxTokens({ OPENWIKI_OPENROUTER_MAX_TOKENS: " 512 " }),
+    ).toBe(512);
+  });
+
+  test("rejects zero, negative, fractional, and non-numeric values", () => {
+    for (const value of ["0", "-1", "1.5", "abc", "", "  ", "1e3", "0x10"]) {
+      expect(() =>
+        resolveOpenRouterMaxTokens({ OPENWIKI_OPENROUTER_MAX_TOKENS: value }),
+      ).toThrow(/OPENWIKI_OPENROUTER_MAX_TOKENS/u);
+    }
   });
 });
 

@@ -44,6 +44,7 @@ import {
   resolveIndexLabels,
 } from "../okf/index-labels.js";
 import { OpenWikiLocalShellBackend } from "./docs-only-backend.js";
+import { getSelectedModelAvailability } from "../model-availability.js";
 import { createOpenWikiIndexMiddleware } from "./okf-middleware.js";
 import { createPersonalToolStartMiddleware } from "./personal-tool-middleware.js";
 import {
@@ -119,6 +120,7 @@ import {
   providerUsesExternalCliAuth,
   providerUsesResponsesApi,
   resolveConfiguredProvider,
+  resolveOpenRouterMaxTokens,
   resolveOpenRouterProviderOnly,
   resolveProviderBaseUrl,
   resolveProviderLocation,
@@ -284,6 +286,25 @@ async function resolveRunConfig(
 
     const modelId = resolveModelId(options, provider);
     emitDebug(options, `model=${modelId}`);
+    const modelAvailability = await getSelectedModelAvailability({
+      provider,
+      modelId,
+      apiKey: getProviderApiKey(provider),
+      baseUrl: providerBaseUrl,
+    });
+    if (modelAvailability.status === "unavailable") {
+      throw new Error(
+        `${getProviderLabel(provider)} does not make model "${modelId}" available to the configured credentials. Set ${OPENWIKI_MODEL_ID_ENV_KEY} to an available model.`,
+      );
+    }
+    if (modelAvailability.status === "unknown") {
+      emitDebug(
+        options,
+        `model.availability=unknown${
+          modelAvailability.reason ? ` reason=${modelAvailability.reason}` : ""
+        }`,
+      );
+    }
     const providerRetryAttempts = resolveProviderRetryAttempts();
     emitDebug(options, `provider.retryAttempts=${providerRetryAttempts}`);
 
@@ -371,7 +392,10 @@ function createOpenWikiAgentGraph(
 
   return createDeepAgent({
     model: options.model,
-    tools: resolveConnectorTools(options.connectorToolProfile),
+    tools: resolveConnectorTools(
+      options.connectorToolProfile,
+      options.outputMode,
+    ),
     checkpointer: options.checkpointer,
     backend,
     middleware:
@@ -651,6 +675,7 @@ async function runOpenWikiAgentCore(
 
 function resolveConnectorTools(
   profile: OpenWikiRunOptions["connectorToolProfile"] = "all",
+  outputMode: OpenWikiOutputMode,
 ) {
   switch (profile) {
     case "none":
@@ -658,7 +683,7 @@ function resolveConnectorTools(
     case "personal-history":
       return createPersonalHistoryConnectorTools();
     case "all":
-      return createOpenWikiConnectorTools();
+      return createOpenWikiConnectorTools(outputMode);
   }
 }
 
@@ -1133,11 +1158,13 @@ export function createModel(
 
   if (provider === "openrouter") {
     const providerOnly = resolveOpenRouterProviderOnly();
+    const maxTokens = resolveOpenRouterMaxTokens();
 
     return new ChatOpenRouter({
       apiKey: process.env[OPENROUTER_API_KEY_ENV_KEY],
       baseURL: OPENROUTER_BASE_URL,
       model: modelId,
+      ...(maxTokens !== undefined ? { maxTokens } : {}),
       provider: providerOnly ? { only: providerOnly } : undefined,
       siteName: "OpenWiki",
       ...retryOptions,

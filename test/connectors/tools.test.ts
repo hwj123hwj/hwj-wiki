@@ -71,6 +71,7 @@ describe("connector tool definitions", () => {
     ).connectorId;
 
     expect(connectorId.enum).toEqual([
+      "custom-mcp",
       "git-repo",
       "google",
       "hackernews",
@@ -94,7 +95,7 @@ describe("connector tool definitions", () => {
     expect(schema.required).toEqual(["connectorId", "toolName"]);
     // Only MCP-backed connectors are callable, and arbitrary tool arguments are
     // permitted because each MCP tool defines its own input schema downstream.
-    expect(properties.connectorId.enum).toEqual(["notion"]);
+    expect(properties.connectorId.enum).toEqual(["custom-mcp", "notion"]);
     expect(properties.args.additionalProperties).toBe(true);
   });
 });
