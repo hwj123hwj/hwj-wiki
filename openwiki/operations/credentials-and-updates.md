@@ -27,7 +27,7 @@ native dependency build begins.
 
 ## Local credential storage
 
-`src/env.ts` manages a private environment file under the user's home directory:
+`src/config/env.ts` manages a private environment file under the user's home directory:
 
 - directory: `~/.openwiki` (mode `0o700`)
 - file: `~/.openwiki/.env` (mode `0o600`)
@@ -37,10 +37,12 @@ The file stores provider configuration and API keys:
 - `OPENWIKI_PROVIDER` — the selected model provider
 - `OPENWIKI_MODEL_ID` — the default model ID
 - `OPENWIKI_PROVIDER_RETRY_ATTEMPTS` — optional positive integer retry count for transient provider request failures; defaults to 3 when unset
+- `OPENWIKI_OPENROUTER_MAX_TOKENS` — optional positive integer cap on per-request output tokens for the openrouter provider, avoiding 402 credit-pre-check failures on low balances (non-secret, shown in diagnostics)
 - Provider API keys: `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `OPENAI_COMPATIBLE_API_KEY`, `ANTHROPIC_API_KEY`, `BASETEN_API_KEY`, `FIREWORKS_API_KEY`, `GEMINI_API_KEY`, `NEBIUS_API_KEY`, `COPILOT_API_KEY` (the copilot provider can also authenticate via the GitHub CLI at runtime — see below)
 - ChatGPT OAuth tokens (for the `openai-chatgpt` provider): `OPENAI_CHATGPT_ACCESS_TOKEN`, `OPENAI_CHATGPT_REFRESH_TOKEN`, `OPENAI_CHATGPT_EXPIRES_AT`, `OPENAI_CHATGPT_ACCOUNT_ID`, `OPENAI_CHATGPT_EMAIL`, `OPENAI_CHATGPT_PLAN`
 - Connector OAuth credentials: `OPENWIKI_GMAIL_ACCESS_TOKEN`, `OPENWIKI_GMAIL_REFRESH_TOKEN`, `OPENWIKI_GOOGLE_CLIENT_ID`, `OPENWIKI_GOOGLE_CLIENT_SECRET`, `OPENWIKI_NOTION_MCP_ACCESS_TOKEN`, `OPENWIKI_NOTION_MCP_CLIENT_ID`, `OPENWIKI_NOTION_MCP_REFRESH_TOKEN`, `OPENWIKI_SLACK_USER_TOKEN`, `OPENWIKI_SLACK_CLIENT_ID`, `OPENWIKI_SLACK_CLIENT_SECRET`, `OPENWIKI_X_ACCESS_TOKEN`, `OPENWIKI_X_CLIENT_ID`, `OPENWIKI_X_CLIENT_SECRET`, `OPENWIKI_X_REFRESH_TOKEN`
 - Base URLs: `ANTHROPIC_BASE_URL` (optional — routes the anthropic provider at an Anthropic-compatible endpoint other than the default API), `OPENAI_COMPATIBLE_BASE_URL` (required by the openai-compatible provider, which has no default endpoint), `OPENAI_BASE_URL` (optional — overrides the openai provider's default endpoint), `COPILOT_BASE_URL` (optional — overrides the copilot provider's default `https://api.githubcopilot.com`, useful for GHE.com data-residency hosts), `BASETEN_BASE_URL`, `FIREWORKS_BASE_URL`, `NVIDIA_BASE_URL` (optional overrides for those providers)
+- `OPENWIKI_OPENAI_COMPATIBLE_USE_RESPONSES_API` — non-secret boolean opt-in that routes the openai-compatible provider through OpenAI's Responses API (`POST {baseURL}/responses`) instead of standard chat completions. Only the literal `true` (case-insensitive, trimmed) enables it; any other value keeps chat completions, and a non-`true`/`false` value surfaces an `invalid boolean` diagnostic warning. Resolved by `resolveOpenAiCompatibleUseResponsesApi()` in `src/config/constants.ts`.
 - AWS Bedrock credentials: `BEDROCK_AWS_ACCESS_KEY_ID`, `BEDROCK_AWS_SECRET_ACCESS_KEY`, `BEDROCK_AWS_SESSION_TOKEN` (optional), `BEDROCK_AWS_REGION` (all supported by the bedrock provider via `authMethod: "aws-sdk"`, which also accepts standard AWS env vars — `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION`, `AWS_DEFAULT_REGION` — as well as `AWS_BEARER_TOKEN_BEDROCK`, `AWS_ROLE_ARN`, and `AWS_WEB_IDENTITY_TOKEN_FILE` for OIDC/web identity)
 - Connector API keys: `TAVILY_API_KEY` for Web Search
 - Google Cloud settings for the gemini-enterprise provider: `GOOGLE_CLOUD_PROJECT` (required to run gemini-enterprise), `GOOGLE_CLOUD_LOCATION` (optional, defaults to `global`), and `GOOGLE_APPLICATION_CREDENTIALS` (optional service-account key file path; never prompted for — Google Application Default Credentials handle auth)
@@ -78,7 +80,7 @@ events to `~/.openwiki/internal-sources/google.jsonl`, `slack.jsonl`, or
 `notion.jsonl`; `openwiki ingest internal` consumes them with a durable cursor.
 No third-party authorization is performed by OpenWiki for this path.
 
-`src/credentials.tsx` provides the interactive bootstrap flow when required:
+`src/setup/credentials.tsx` (thin re-export over `src/setup/credentials/` modules: `steps.ts`, `view.tsx`, `use-init-setup.ts`, `persistence.ts`, `format.ts`, `constants.ts`, `types.ts`) provides the interactive bootstrap flow when required:
 
 - prompts for a provider (arrow-key selection menu),
 - prompts for the provider's API key (skipped for the gemini-enterprise provider, which prompts for a required Google Cloud project ID and an optional location instead; skipped for the bedrock provider, which prompts for AWS access key ID, secret access key, and region instead),
@@ -98,8 +100,9 @@ templates: Personal Work OS, AI Research Radar, Git Project Wiki, Social Media
   template seeds the wiki scope prompt, and the user can edit it before saving.
 
 Onboarding then walks through source connections for local Git repositories,
-Notion, Gmail, X/Twitter, Web Search, and Hacker News. Non-secret setup
-preferences are stored in `~/.openwiki/onboarding.json`:
+Notion, Gmail, X/Twitter, Web Search, Hacker News, and the generic Custom MCP
+source (configured via `~/.openwiki/connectors/custom-mcp/config.json` after
+setup). Non-secret setup preferences are stored in `~/.openwiki/onboarding.json`:
 
 - the selected template ID/name,
 - which sources have been connected,
@@ -113,7 +116,7 @@ The user's global personal wiki scope/intent is stored as Markdown in
 
 In **code mode**, the wiki brief is stored at the repository level as
 `<repo>/openwiki/INSTRUCTIONS.md` instead of the global file.
-`saveRepositoryWikiInstructions()` in `src/onboarding.ts` writes the brief
+`saveRepositoryWikiInstructions()` in `src/setup/onboarding.ts` writes the brief
 there during code-mode onboarding, and `isRepositoryCodeOnboardingCompleteSync()`
 checks for its presence when deciding whether onboarding is complete. This
 ensures every new repository gets a proposed default wiki brief even when the
@@ -168,7 +171,7 @@ saved repeat `pmset` schedule and marks the saved wake window disabled.
 
 ## Provider resolution
 
-`resolveConfiguredProvider()` in `src/constants.ts` determines the active provider:
+`resolveConfiguredProvider()` in `src/config/constants.ts` determines the active provider:
 
 1. If `OPENWIKI_PROVIDER` is set and valid, use it.
 2. Otherwise, use the first available provider API key in this order: OpenAI, OpenAI-compatible, OpenRouter, Anthropic, Baseten, Fireworks, Nebius, NVIDIA, then Bedrock.
@@ -176,7 +179,9 @@ saved repeat `pmset` schedule and marks the saved wake window disabled.
 
 The copilot provider is selectable but never auto-detected — its credential comes from the GitHub CLI at runtime, so `resolveConfiguredProvider()` does not probe for it.
 
-`needsCredentialSetup()` in `src/credentials.tsx` checks whether the provider env var is valid and whether the provider's required credentials (its API key, or `GOOGLE_CLOUD_PROJECT` for gemini-enterprise — via `getMissingProviderEnvKey()` in `src/constants.ts`), a model ID (unless overridden), and a LangSmith key are all present. Any missing value or invalid provider triggers the interactive flow.
+`needsCredentialSetup()` in `src/setup/credentials.tsx` checks whether the provider env var is valid and whether the provider's required credentials (its API key, or `GOOGLE_CLOUD_PROJECT` for gemini-enterprise — via `getMissingProviderEnvKey()` in `src/config/constants.ts`), a model ID (unless overridden), and a LangSmith key are all present. Any missing value or invalid provider triggers the interactive flow.
+
+After the provider and model ID resolve, `resolveRunConfig()` in `src/agent/index.ts` validates the selected model's availability via `getSelectedModelAvailability()` in `src/model-availability.ts`. For the `openai` provider with an API key and the default endpoint, it queries the OpenAI Models API and aborts with a clear message when the model is not exposed to the configured credentials; every other case (non-OpenAI providers, custom endpoints, missing key, or lookup failure) proceeds as `unknown` so a catalogue lookup failure never blocks inference.
 
 ## Model and credential diagnostics
 
@@ -188,7 +193,8 @@ The env layer also produces diagnostics for the CLI UI. Those diagnostics report
 - a masked preview,
 - warnings for suspicious formatting such as whitespace, newlines, quotes, or bracketed suffixes,
 - invalid model IDs,
-- invalid provider values.
+- invalid provider values,
+- invalid `OPENWIKI_OPENROUTER_MAX_TOKENS` values.
 
 Diagnostics cover all provider keys (including `OPENAI_CHATGPT_ACCESS_TOKEN` and related ChatGPT OAuth tokens), plus `OPENWIKI_PROVIDER`, `OPENWIKI_MODEL_ID`, `OPENWIKI_PROVIDER_RETRY_ATTEMPTS`, the base URLs (`ANTHROPIC_BASE_URL`, `OPENAI_COMPATIBLE_BASE_URL`, `OPENAI_BASE_URL`), the Google Cloud settings (`GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_APPLICATION_CREDENTIALS`), the AWS Bedrock settings (`BEDROCK_AWS_ACCESS_KEY_ID`, `BEDROCK_AWS_SECRET_ACCESS_KEY`, `BEDROCK_AWS_REGION`), connector credentials, and `LANGSMITH_API_KEY`. This makes startup problems easier to diagnose without exposing secret values (non-secret values such as the provider, model ID, retry attempts, base URLs, and the Google Cloud settings are shown in full — the service-account key _path_ is not a secret, though the file it points to is).
 
@@ -249,7 +255,9 @@ Failure events are classified by walking an unwrap chain (`unwrapErrorChain()`, 
 
 ## Scheduled CI workflows
 
-During `openwiki code --init`, `src/code-mode.ts` also creates `.github/workflows/openwiki-update.yml` in the target repository if it does not already exist. On `--update` and chat runs, an existing workflow file is preserved verbatim so repo-specific customizations (fork guards, pinned actions, custom steps) are never silently overwritten. AGENTS.md and CLAUDE.md snippets are refreshed in place on every code-mode run using `<!-- OPENWIKI:START -->` / `<!-- OPENWIKI:END -->` markers.
+During `openwiki code --init`, `src/ingestion/code-mode.ts` also creates `.github/workflows/openwiki-update.yml` in the target repository if it does not already exist. On `--update` and chat runs, an existing workflow file is preserved verbatim so repo-specific customizations (fork guards, pinned actions, custom steps) are never silently overwritten. AGENTS.md and CLAUDE.md snippets are refreshed in place on every code-mode run using `<!-- OPENWIKI:START -->` / `<!-- OPENWIKI:END -->` markers. The two files now carry distinct managed content: AGENTS.md holds the full OpenWiki agent-instruction snippet (the canonical source), while CLAUDE.md holds a minimal pointer that links to `AGENTS.md`, so Claude Code — which reads CLAUDE.md at startup — is routed to the single source of truth rather than receiving a duplicated copy that can drift (#640).
+
+The generated workflow's `env:` block is derived from the provider the operator configured during setup (`createWorkflowProviderEnv()` in `src/ingestion/code-mode.ts`), so a freshly created workflow authenticates the actual configured provider instead of shipping a fixed OpenRouter block whose first scheduled run fails on a secret the repo was never told about. Secrets go through `secrets.<KEY>` and non-sensitive settings (endpoint, project, region) through `vars.<KEY>`; `OPENWIKI_MODEL_ID` is quoted (JSON-stringified) because model IDs are not all plain YAML scalars — a Cloudflare Workers AI ID leading with `@` is a reserved YAML indicator that fails to parse unquoted. OAuth/browser-login providers (like `openai-chatgpt`) emit a comment instead of a secret, because their access token is short-lived and refreshed in place, so pinning it would break on the first rotation. Bedrock emits no preset model ID because entitlements are account- and region-specific. The provider env derivation is covered by `test/ingestion/code-mode.test.ts` ("authenticates the provider the operator configured", "emits non-secret provider settings as repository variables", "pairs both AWS credentials and the region for Bedrock", "does not pin a rotating browser-login token as a secret", "quotes the model ID so reserved YAML characters survive").
 
 The repository includes `examples/openwiki-update.yml` as a copyable GitHub Actions scheduled update workflow. It:
 
@@ -294,32 +302,35 @@ Bitbucket users should configure repository variables for the model provider key
 - Never document real secret values; only document the presence and purpose of the configuration.
 - If update metadata semantics change, update both the agent runtime and the docs that explain how update runs are scoped.
 - Scheduled automation depends on the same CLI entrypoint as local users, so workflow changes should be validated against `package.json` and the CLI help text.
-- When adding a provider, update `managedEnvKeys` in `src/env.ts` so the env file is formatted correctly and diagnostics cover the new key. Providers without an API key (like gemini-enterprise) declare their required env keys in `PROVIDER_CONFIGS` (e.g. `projectEnvKey`) and are gated by `getMissingProviderEnvKey()`. Providers with a paired secret and region (like bedrock) use `secretKeyEnvKey` and `regionEnvKey` with `requiresRegion: true`. External-CLI-auth providers (like copilot) declare `authMethod: "external-cli"` and `externalCliAuthAdapter`; the CLI login flow is handled in `src/external-cli-auth.ts`, and the token is never persisted to `~/.openwiki/.env`. AWS SDK providers (like bedrock) declare `authMethod: "aws-sdk"` and delegate credential resolution to the AWS SDK chain.
+- When adding a provider, update `managedEnvKeys` in `src/config/env.ts` so the env file is formatted correctly and diagnostics cover the new key. Providers without an API key (like gemini-enterprise) declare their required env keys in `PROVIDER_CONFIGS` (e.g. `projectEnvKey`) and are gated by `getMissingProviderEnvKey()`. Providers with a paired secret and region (like bedrock) use `secretKeyEnvKey` and `regionEnvKey` with `requiresRegion: true`. External-CLI-auth providers (like copilot) declare `authMethod: "external-cli"` and `externalCliAuthAdapter`; the CLI login flow is handled in `src/auth/external-cli-auth.ts`, and the token is never persisted to `~/.openwiki/.env`. AWS SDK providers (like bedrock) declare `authMethod: "aws-sdk"` and delegate credential resolution to the AWS SDK chain.
 - The content-snapshot check means CI runs that produce no changes will not update `.last-update.json` or open a PR with metadata-only changes.
 - Scheduled update workflows must fetch full history (`fetch-depth: 0` for GitHub Actions, `GIT_DEPTH: "0"` for GitLab CI, `clone: depth: full` for Bitbucket). A shallow clone hides the commit recorded in `.last-update.json`, so `openwiki code --update` cannot build a change window and runs against an empty summary.
+- The generated GitHub Actions workflow's `env:` block is provider-aware: `createWorkflowProviderEnv()` in `src/ingestion/code-mode.ts` derives it from the configured provider, routing secrets through `secrets.<KEY>` and non-sensitive settings through `vars.<KEY>`, quoting `OPENWIKI_MODEL_ID`, and emitting a comment for browser-login providers. If you change provider config fields, keep `createWorkflowProviderEnv()` and `test/ingestion/code-mode.test.ts` in sync so a freshly created workflow still authenticates the operator's provider.
 - Interrupted runs write `status: "interrupted"` so the next update retries. If metadata semantics change, keep `getUpdateNoopStatus()` and `persistRunMetadataIfChanged()` in sync so the interrupted/complete lifecycle is preserved.
 - The `build_channel` stamp (`scripts/stamp-build-channel.cjs`) targets exactly one `const BUILD_CHANNEL: BuildChannel = "…"` assignment in `src/telemetry/gates.ts`. Renaming that line, splitting it, or changing its formatting breaks the regex and fails the release loudly (`test/stamp-build-channel.test.ts`). Keep the committed value `"community"`; only the upstream release pipeline (`.github/workflows/release.yml`) sets `OPENWIKI_BUILD_CHANNEL=official`. A drifted `gates.ts` that no longer matches the assignment pattern will throw instead of silently publishing an unstamped build.
 
 ## Source map
 
-- `src/env.ts`
-- `src/credentials.tsx`
-- `src/constants.ts`
+- `src/config/env.ts`
+- `src/setup/credentials.tsx` (re-exports `src/setup/credentials/`)
+- `src/config/constants.ts`
 - `src/agent/utils.ts`
 - `src/agent/index.ts`
+- `src/model-availability.ts`
 - `src/agent/openai-chatgpt-oauth.ts`
-- `src/external-cli-auth.ts`
-- `src/diagnostics.ts`
+- `src/auth/external-cli-auth.ts`
+- `src/platform/diagnostics.ts`
 - `src/telemetry/`
 - `scripts/stamp-build-channel.cjs`
 - `.github/workflows/release.yml`
 - `src/auth/oauth.ts`
+- `src/auth/oauth-discovery.ts`
 - `src/auth/providers.ts`
 - `src/auth/configure.ts`
 - `src/auth/tokens.ts`
-- `src/onboarding.ts`
-- `src/schedules.ts`
-- `src/code-mode.ts`
+- `src/setup/onboarding.ts`
+- `src/scheduling/schedules.ts`
+- `src/ingestion/code-mode.ts`
 - `src/agent/openwiki-ignore.ts`
 - `src/agent/docs-only-backend.ts`
 - `src/agent/prompt.ts`

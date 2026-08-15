@@ -3,7 +3,13 @@ name: Sync OpenWiki upstream
 on:
   workflow_dispatch:
   schedule:
-    - cron: "17 2 * * 1"
+    # 02:17 UTC / 10:17 China Standard Time. Run every day so upstream fixes
+    # are reviewed while their conflict surface is still small.
+    - cron: "17 2 * * *"
+
+concurrency:
+  group: sync-openwiki-upstream
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -18,33 +24,145 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Merge upstream OpenWiki
+      - name: Prepare upstream sync branch
         id: merge
         env:
+          STATE_FILE: .github/openwiki-upstream-sync.json
+          UPSTREAM_REF: main
           UPSTREAM_URL: https://github.com/langchain-ai/openwiki.git
+        shell: bash
         run: |
+          set -euo pipefail
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git remote add upstream "$UPSTREAM_URL"
-          git fetch upstream main
-          git fetch origin automation/sync-upstream:refs/remotes/origin/automation/sync-upstream || true
-          if git merge-base --is-ancestor upstream/main HEAD; then
+          git fetch --no-tags upstream "$UPSTREAM_REF"
+
+          # Keep the remote-tracking ref fresh before force-with-lease pushes.
+          if git ls-remote --exit-code --heads origin automation/sync-upstream >/dev/null; then
+            git fetch --no-tags origin \
+              automation/sync-upstream:refs/remotes/origin/automation/sync-upstream
+          fi
+
+          baseline_sha="$(node --input-type=module - "$STATE_FILE" "$UPSTREAM_URL" "$UPSTREAM_REF" <<'NODE'
+          import { readFileSync } from "node:fs";
+
+          const [stateFile, upstreamUrl, upstreamRef] = process.argv.slice(2);
+          const state = JSON.parse(readFileSync(stateFile, "utf8"));
+          if (
+            state.version !== 1 ||
+            state.upstream !== upstreamUrl ||
+            state.ref !== upstreamRef ||
+            !/^[0-9a-f]{40}$/iu.test(state.lastSyncedCommit)
+          ) {
+            throw new Error(
+              `Invalid ${stateFile}; restore the recorded OpenWiki upstream baseline before retrying.`,
+            );
+          }
+          process.stdout.write(state.lastSyncedCommit);
+          NODE
+          )"
+          upstream_sha="$(git rev-parse "upstream/$UPSTREAM_REF")"
+
+          if ! git cat-file -e "${baseline_sha}^{commit}"; then
+            echo "::error title=Missing upstream baseline::${baseline_sha} is not available after fetching upstream/$UPSTREAM_REF."
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$baseline_sha" "$upstream_sha"; then
+            echo "::error title=Upstream history changed::The recorded baseline is not an ancestor of upstream/$UPSTREAM_REF; resolve the upstream rewrite manually."
+            exit 1
+          fi
+          if [ "$baseline_sha" = "$upstream_sha" ]; then
+            {
+              echo "## OpenWiki upstream sync"
+              echo
+              echo "Already current at \`$upstream_sha\`."
+            } >> "$GITHUB_STEP_SUMMARY"
             echo "changed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          git switch -C automation/sync-upstream
-          git merge --no-edit upstream/main
-          git push --force-with-lease origin automation/sync-upstream
-          echo "changed=true" >> "$GITHUB_OUTPUT"
 
-      - name: Open upstream sync pull request
+          base_sha="$(git rev-parse HEAD)"
+          git switch -C automation/sync-upstream "$base_sha"
+
+          # Do a three-way merge with the last successfully applied upstream
+          # revision as the explicit base. This stays correct if the sync PR is
+          # later squash- or rebase-merged and therefore loses Git ancestry.
+          set +e
+          merge_output="$(git merge-tree --write-tree --merge-base "$baseline_sha" "$base_sha" "$upstream_sha" 2>&1)"
+          merge_status=$?
+          set -e
+          if [ "$merge_status" -ne 0 ]; then
+            {
+              echo "## OpenWiki upstream sync needs manual resolution"
+              echo
+              echo "- Recorded baseline: \`$baseline_sha\`"
+              echo "- Current upstream: \`$upstream_sha\`"
+              echo
+              echo '```text'
+              printf '%s\n' "$merge_output"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            printf '%s\n' "$merge_output" >&2
+            echo "::error title=OpenWiki upstream merge conflict::Resolve the files listed in the job summary, then update .github/openwiki-upstream-sync.json with the merged upstream revision."
+            exit "$merge_status"
+          fi
+
+          merged_tree="${merge_output%%$'\n'*}"
+          if ! [[ "$merged_tree" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error title=Unexpected merge-tree output::Expected a merged tree object ID, got: $merge_output"
+            exit 1
+          fi
+
+          merge_commit="$(printf 'chore: sync OpenWiki upstream\n\nUpstream: %s\n' "$upstream_sha" | git commit-tree "$merged_tree" -p "$base_sha" -p "$upstream_sha")"
+          git switch --detach "$merge_commit"
+
+          node --input-type=module - "$STATE_FILE" "$UPSTREAM_URL" "$UPSTREAM_REF" "$upstream_sha" <<'NODE'
+          import { mkdirSync, writeFileSync } from "node:fs";
+          import { dirname } from "node:path";
+
+          const [stateFile, upstream, ref, lastSyncedCommit] = process.argv.slice(2);
+          mkdirSync(dirname(stateFile), { recursive: true });
+          writeFileSync(
+            stateFile,
+            `${JSON.stringify({ version: 1, upstream, ref, lastSyncedCommit }, null, 2)}\n`,
+            "utf8",
+          );
+          NODE
+          git add "$STATE_FILE"
+
+          final_tree="$(git write-tree)"
+          final_commit="$(printf 'chore: sync OpenWiki upstream\n\nUpstream: %s\n' "$upstream_sha" | git commit-tree "$final_tree" -p "$base_sha" -p "$upstream_sha")"
+          git branch -f automation/sync-upstream "$final_commit"
+          git switch automation/sync-upstream
+          git push --force-with-lease origin automation/sync-upstream
+
+          {
+            echo "## OpenWiki upstream sync"
+            echo
+            echo "- Recorded baseline: \`$baseline_sha\`"
+            echo "- Prepared upstream: \`$upstream_sha\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "upstream_sha=$upstream_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Open or refresh upstream sync pull request
         if: steps.merge.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          UPSTREAM_SHA: ${{ steps.merge.outputs.upstream_sha }}
+        shell: bash
         run: |
+          set -euo pipefail
+          body="Automated three-way merge of OpenWiki upstream at \`$UPSTREAM_SHA\`.
+
+          The workflow records the applied revision in \`.github/openwiki-upstream-sync.json\`, so this PR remains safe to squash- or rebase-merge. Review the personalization adapter and checks before merging."
           gh pr create \
             --base main \
             --head automation/sync-upstream \
             --title "chore: sync OpenWiki upstream" \
-            --body "Automated merge of the latest langchain-ai/openwiki main branch. Review personalization adapter conflicts and checks before merging." \
-            || gh pr view automation/sync-upstream
+            --body "$body" \
+            || gh pr edit automation/sync-upstream \
+              --title "chore: sync OpenWiki upstream" \
+              --body "$body"
