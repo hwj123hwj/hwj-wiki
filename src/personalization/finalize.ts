@@ -153,14 +153,10 @@ async function updateQuickstartNavigation(wikiRoot: string): Promise<void> {
   const links: string[] = [];
   const labels: Record<string, string> = {
     commitments: "承诺追踪",
-    decisions: "设计与工作决策",
-    "doubao-knowledge": "豆包知识卡片",
     journals: "项目与开发日志",
-    lessons: "可复用经验",
-    "open-questions": "开放问题",
     projects: "项目知识",
-    sources: "证据来源",
     themes: "长期主题",
+    topics: "主题知识",
   };
 
   for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
@@ -210,7 +206,9 @@ async function updatePersonalTrackingPages(wikiRoot: string): Promise<void> {
         const fields = parseFrontmatterFields(content) ?? {};
         const stableKey =
           stringField(fields.stableKey) ?? stringField(fields.stable_key);
-        if (!stableKey) return undefined;
+        // 主题页（type: Topic）没有单一 stableKey，但 tags 统计需包含
+        const isTopic = stringField(fields.type) === "Topic";
+        if (!stableKey && !isTopic) return undefined;
         return {
           relativePath,
           tags: arrayField(fields.tags),
@@ -230,12 +228,13 @@ async function updatePersonalTrackingPages(wikiRoot: string): Promise<void> {
       themes.set(tag, tagged);
     }
   }
+  // 主题页已按 topics/ 聚合，themes.md 不再全量罗列每页链接（曾膨胀至
+  // 39739 行）——只保留标签规模统计，导航交给各目录 index。
+  const MAX_THEME_TAGS = 60;
   const themeSections = [...themes]
-    .sort(([left], [right]) => left.localeCompare(right, "zh-CN"))
-    .map(
-      ([tag, tagged]) =>
-        `### ${tag}\n\n${renderTrackingLinks(uniquePages(tagged))}`,
-    );
+    .sort((left, right) => right[1].length - left[1].length)
+    .slice(0, MAX_THEME_TAGS)
+    .map(([tag, tagged]) => `- ${tag}：${uniquePages(tagged).length} 条`);
   await updateTrackingPage(
     wikiRoot,
     "themes.md",
@@ -660,7 +659,15 @@ async function validateEvidence(
       options.baselineBodies !== undefined &&
       options.baselineBodies[page.relativePath] !== bodyHash(page.content);
     const refs = arrayField(page.fields.sourceRefs);
-    if (bodyChanged && candidateRefs.size > 0 && !stableKey) {
+    // 主题页（type: Topic）没有单一 stableKey——候选承载由
+    // validateCandidateCoverage 的 stableKeys 索引负责校验
+    const isTopicPage = stringField(page.fields.type) === "Topic";
+    if (
+      bodyChanged &&
+      candidateRefs.size > 0 &&
+      !stableKey &&
+      !isTopicPage
+    ) {
       issues.push({
         code: "missing_stable_key",
         file: page.relativePath,
@@ -752,6 +759,10 @@ function validateCandidateCoverage(
     for (const alias of arrayField(page.fields.stableKeyAliases)) {
       byStableKey.set(alias, page);
     }
+    // 主题页（type: Topic）通过 stableKeys 数组收纳候选
+    for (const key of arrayField(page.fields.stableKeys)) {
+      if (!byStableKey.has(key)) byStableKey.set(key, page);
+    }
     if (
       !options.allowFallbackGenerated &&
       page.fields.fallbackGenerated === true
@@ -773,7 +784,8 @@ function validateCandidateCoverage(
       });
       continue;
     }
-    if (page.fields.type !== candidate.type) {
+    // 主题页承载多类型候选（Lesson/Decision/...），跳过逐页 type 一致性
+    if (page.fields.type !== "Topic" && page.fields.type !== candidate.type) {
       issues.push({
         code: "candidate_type_mismatch",
         file: page.relativePath,
@@ -954,17 +966,15 @@ function directoryForKnowledgeType(type: string): string | undefined {
     case "Journal":
       return "journals";
     case "Lesson":
-      return "lessons";
     case "KnowledgeCard":
-      return "doubao-knowledge";
     case "Decision":
-      return "decisions";
+    case "OpenQuestion":
+    case "SourceEvidence":
+    case "Topic":
+      // 五类知识型候选 + 主题页统一归并到 topics/
+      return "topics";
     case "Commitment":
       return "commitments";
-    case "OpenQuestion":
-      return "open-questions";
-    case "SourceEvidence":
-      return "sources";
     default:
       return undefined;
   }

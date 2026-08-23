@@ -181,12 +181,12 @@ describe("personal workflow end to end", () => {
       processedBatchCount: 5,
       status: "complete",
     });
-    const lessons = (await readdir(path.join(wikiRoot, "lessons"))).filter(
+    const topics = (await readdir(path.join(wikiRoot, "topics"))).filter(
       (file) => file !== "index.md",
     );
-    expect(lessons).toHaveLength(1);
+    expect(topics).toHaveLength(1);
     const page = await readFile(
-      path.join(wikiRoot, "lessons", lessons[0]),
+      path.join(wikiRoot, "topics", topics[0]),
       "utf8",
     );
     expect(page).toContain("批次上限应为 80");
@@ -323,11 +323,11 @@ describe("personal workflow end to end", () => {
       status: "partial",
     });
     expect(await listCandidateReviews("personal", stateRoot)).toHaveLength(1);
-    const lessonFile = (await readdir(path.join(wikiRoot, "lessons"))).find(
+    const topicFile = (await readdir(path.join(wikiRoot, "topics"))).find(
       (file) => file !== "index.md",
     );
     expect(
-      await readFile(path.join(wikiRoot, "lessons", lessonFile ?? ""), "utf8"),
+      await readFile(path.join(wikiRoot, "topics", topicFile ?? ""), "utf8"),
     ).toContain("fallbackGenerated: true");
 
     const second = await runPersonalBatchPipeline(
@@ -343,7 +343,7 @@ describe("personal workflow end to end", () => {
     });
     expect(await listCandidateReviews("personal", stateRoot)).toEqual([]);
     expect(
-      await readFile(path.join(wikiRoot, "lessons", lessonFile ?? ""), "utf8"),
+      await readFile(path.join(wikiRoot, "topics", topicFile ?? ""), "utf8"),
     ).toContain("fallbackGenerated: false");
   });
 });

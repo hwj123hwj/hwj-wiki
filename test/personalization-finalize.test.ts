@@ -100,41 +100,46 @@ describe("personal wiki deterministic finalization", () => {
     expect(result.report).toMatchObject({ valid: true });
     expect(result.files).toHaveLength(1);
 
-    const lessonFiles = (await readdir(path.join(wikiRoot, "lessons"))).filter(
+    // 主题归并：同项目（hwj-wiki）的两条 lesson 进同一主题页，各成一节
+    const topicFiles = (await readdir(path.join(wikiRoot, "topics"))).filter(
       (file) => file !== "index.md",
     );
-    expect(lessonFiles).toHaveLength(1);
+    expect(topicFiles).toHaveLength(1);
     const page = await readFile(
-      path.join(wikiRoot, "lessons", lessonFiles[0]),
+      path.join(wikiRoot, "topics", topicFiles[0]),
       "utf8",
     );
     expect(page).toContain("fallbackGenerated: true");
-    expect(page).toContain("stableKeyAliases");
+    expect(page).toContain("stableKeys:");
     expect(page).toContain("validAsOf");
     expect(page).toContain(refs[0]);
     expect(page).toContain(refs[1]);
+    expect(page).toContain("## 统一知识库质量收尾");
+    expect(page).toContain("## 知识库统一质量收尾");
 
     const directoryIndex = await readFile(
-      path.join(wikiRoot, "lessons", "index.md"),
+      path.join(wikiRoot, "topics", "index.md"),
       "utf8",
     );
-    expect(directoryIndex).toContain(lessonFiles[0]);
+    expect(directoryIndex).toContain(topicFiles[0]);
     const quickstart = await readFile(
       path.join(wikiRoot, "quickstart.md"),
       "utf8",
     );
-    expect(quickstart).toContain("[可复用经验](lessons/)");
+    expect(quickstart).toContain("(topics/)");
     const themes = await readFile(path.join(wikiRoot, "themes.md"), "utf8");
-    expect(themes).toContain("### 质量");
-    expect(themes).toContain(lessonFiles[0]);
+    // themes.md 封顶后只有标签统计行，不再罗列页面链接
+    expect(themes).toContain("- 质量：");
   });
 
   test("repairs duplicate stable-key pages before the quality gate", async () => {
     const { refs, stateRoot, wikiRoot } = await fixture();
-    const candidate = lesson(
-      refs[0],
-      "原生合并重复建页时仍需保留一份 canonical 页面。",
-    );
+    const candidate: KnowledgeCandidate = {
+      ...lesson(refs[0], "原生合并重复建页时仍需保留一份 canonical 页面。"),
+      stableKey: "hwj-wiki/commitment/保留canonical页面",
+      title: "保留canonical页面",
+      type: "Commitment",
+    };
     const generated = await generatePersonalWikiFallback(
       wikiRoot,
       [candidate],
@@ -143,8 +148,8 @@ describe("personal wiki deterministic finalization", () => {
     );
     const duplicatePath = path.join(
       wikiRoot,
-      "lessons",
-      "lesson-readable-duplicate.md",
+      "commitments",
+      "commitment-readable-duplicate.md",
     );
     await writeFile(
       duplicatePath,
@@ -159,10 +164,10 @@ describe("personal wiki deterministic finalization", () => {
 
     expect(repaired.archivedFiles).toHaveLength(1);
     expect(repaired.changedFiles).toHaveLength(1);
-    const lessonFiles = (await readdir(path.join(wikiRoot, "lessons"))).filter(
-      (file) => file !== "index.md",
-    );
-    expect(lessonFiles).toEqual(["lesson-readable-duplicate.md"]);
+    const commitmentFiles = (
+      await readdir(path.join(wikiRoot, "commitments"))
+    ).filter((file) => file !== "index.md");
+    expect(commitmentFiles).toEqual(["commitment-readable-duplicate.md"]);
     const archived = path.join(
       wikiRoot,
       ".openwiki-recovery",
@@ -178,7 +183,10 @@ describe("personal wiki deterministic finalization", () => {
     });
     expect(report.valid).toBe(true);
     expect(
-      await readFile(path.join(wikiRoot, "lessons", lessonFiles[0]), "utf8"),
+      await readFile(
+        path.join(wikiRoot, "commitments", commitmentFiles[0]),
+        "utf8",
+      ),
     ).toContain("fallbackGenerated: false");
   });
 
@@ -260,8 +268,9 @@ Windows 路径：C:\Users\weijian\Desktop\private.json
     );
     expect(generated.report.valid).toBe(true);
     const baselineBodies = await capturePersonalWikiBodySnapshot(wikiRoot);
+    await mkdir(path.join(wikiRoot, "topics"), { recursive: true });
     await writeFile(
-      path.join(wikiRoot, "lessons", "untraceable.md"),
+      path.join(wikiRoot, "topics", "untraceable.md"),
       "# 无来源页面\n\n这是本批额外生成、但无法关联候选证据的内容。\n",
     );
 
@@ -334,9 +343,15 @@ Windows 路径：C:\Users\weijian\Desktop\private.json
     expect(
       await readFile(path.join(wikiRoot, "commitments.md"), "utf8"),
     ).toContain("commitments/commitment-");
-    expect(
-      await readFile(path.join(wikiRoot, "open-questions.md"), "utf8"),
-    ).toContain("open-questions/open-question-");
+    // OpenQuestion 归并进主题页：问题作为主题页内一节呈现
+    const topicFiles = (await readdir(path.join(wikiRoot, "topics"))).filter(
+      (file) => file !== "index.md",
+    );
+    const topicBody = await readFile(
+      path.join(wikiRoot, "topics", topicFiles[0]),
+      "utf8",
+    );
+    expect(topicBody).toContain("## 真实历史整理耗时");
   });
 
   test("accepts escaped brackets in index link labels", async () => {
@@ -362,16 +377,21 @@ Windows 路径：C:\Users\weijian\Desktop\private.json
     );
 
     expect(result.report.valid).toBe(true);
-    const openQuestionsIndex = await readFile(
-      path.join(wikiRoot, "open-questions", "index.md"),
+    // 两类候选归并进主题页；带方括号的标题原样保留在节标题里
+    const topicFiles = (await readdir(path.join(wikiRoot, "topics"))).filter(
+      (file) => file !== "index.md",
+    );
+    const topicBody = await readFile(
+      path.join(wikiRoot, "topics", topicFiles[0]),
       "utf8",
     );
-    const sourcesIndex = await readFile(
-      path.join(wikiRoot, "sources", "index.md"),
+    expect(topicBody).toContain("[29]");
+    expect(topicBody).toContain("[14]-[21]");
+    const topicsIndex = await readFile(
+      path.join(wikiRoot, "topics", "index.md"),
       "utf8",
     );
-    expect(openQuestionsIndex).toMatch(/\\\[29\\\]/u);
-    expect(sourcesIndex).toMatch(/\\\[14\\\]-\\\[21\\\]/u);
+    expect(topicsIndex).toContain(topicFiles[0]);
   });
 
   test("keeps identical titles separate across knowledge types", async () => {
@@ -396,10 +416,19 @@ Windows 路径：C:\Users\weijian\Desktop\private.json
     );
 
     expect(result.report.valid).toBe(true);
+    // Project 仍一候选一页；Lesson 归并进主题页（不同承载，不冲突）
     expect(result.files.some((file) => file.startsWith("projects/"))).toBe(
       true,
     );
-    expect(result.files.some((file) => file.startsWith("lessons/"))).toBe(true);
+    expect(result.files.some((file) => file.startsWith("topics/"))).toBe(true);
+    const topicFiles = (await readdir(path.join(wikiRoot, "topics"))).filter(
+      (file) => file !== "index.md",
+    );
+    const topicBody = await readFile(
+      path.join(wikiRoot, "topics", topicFiles[0]),
+      "utf8",
+    );
+    expect(topicBody).toContain("hwj-wiki/lesson/同名主题");
   });
 
   test("does not upgrade old unverified volatile evidence implicitly", async () => {
@@ -420,11 +449,11 @@ Windows 路径：C:\Users\weijian\Desktop\private.json
       "zh-CN",
       stateRoot,
     );
-    const lessonFile = (await readdir(path.join(wikiRoot, "lessons"))).find(
+    const topicFile = (await readdir(path.join(wikiRoot, "topics"))).find(
       (file) => file !== "index.md",
     );
     const content = await readFile(
-      path.join(wikiRoot, "lessons", lessonFile ?? ""),
+      path.join(wikiRoot, "topics", topicFile ?? ""),
       "utf8",
     );
     expect(content).toContain('confidence: "unverified"');
