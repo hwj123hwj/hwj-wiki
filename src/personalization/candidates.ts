@@ -77,6 +77,8 @@ export interface KnowledgeCandidate {
   summary: string;
   tags: string[];
   title: string;
+  /** 主题归并键：同主题的候选会合并进同一篇 topics/ 页面（人类可读短语）。 */
+  topicKey?: string;
   type: KnowledgeCandidateType;
   validAsOf?: string;
   volatile: boolean;
@@ -294,6 +296,9 @@ export function createCandidateExtractionPrompt(
 - title、summary
 - facts、decisions、reusableLessons、tags：字符串数组
 - project：可选
+- topicKey：可选。主题归并键，同一主题的知识会合并进同一篇主题页；
+  用简短人类可读短语（如 "mevo-对象存储接入"、"docker-实践"、"go-并发"），
+  相同主题跨批次保持一致；没有明确主题时省略
 - occurredAt：可选 ISO 日期或时间
 - sourceRefs：只能从下面记录的 sourceRef 原样选取，至少一个
 - confidence：${KNOWLEDGE_CONFIDENCE_LEVELS.join(" | ")}
@@ -646,6 +651,7 @@ function normalizeCandidate(
   if (sourceRefs.length === 0) return undefined;
 
   const project = safeString(raw.project, 160);
+  const topicKey = safeString(raw.topicKey, 64);
   const facts = stringArray(raw.facts, 40, 1_000);
   const decisions = stringArray(raw.decisions, 30, 1_000);
   const reusableLessons = stringArray(raw.reusableLessons, 30, 1_000);
@@ -693,6 +699,7 @@ function normalizeCandidate(
     summary,
     tags: [...new Set(tags.map((tag) => tag.toLowerCase()))].sort(),
     title,
+    ...(topicKey ? { topicKey } : {}),
     type,
     ...(validAsOf ? { validAsOf } : {}),
     volatile,
