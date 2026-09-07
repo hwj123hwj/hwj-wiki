@@ -662,12 +662,7 @@ async function validateEvidence(
     // 主题页（type: Topic）没有单一 stableKey——候选承载由
     // validateCandidateCoverage 的 stableKeys 索引负责校验
     const isTopicPage = stringField(page.fields.type) === "Topic";
-    if (
-      bodyChanged &&
-      candidateRefs.size > 0 &&
-      !stableKey &&
-      !isTopicPage
-    ) {
+    if (bodyChanged && candidateRefs.size > 0 && !stableKey && !isTopicPage) {
       issues.push({
         code: "missing_stable_key",
         file: page.relativePath,

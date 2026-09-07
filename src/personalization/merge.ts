@@ -70,7 +70,11 @@ export async function mergeCandidatesDeterministically(
       matching?.relativePath ?? candidatePath(candidate, pages);
     const original = matching?.content;
     const next = isTopicCandidate(candidate)
-      ? mergeCandidateIntoTopicPage(original, candidate, options.fallbackGenerated)
+      ? mergeCandidateIntoTopicPage(
+          original,
+          candidate,
+          options.fallbackGenerated,
+        )
       : mergeCandidateIntoPage(original, candidate, options.fallbackGenerated);
     representedStableKeys.push(candidate.stableKey);
     if (next === original) continue;
@@ -380,8 +384,8 @@ function findMatchingTopicPage(
   pages: ExistingPage[],
   candidate: KnowledgeCandidate,
 ): ExistingPage | undefined {
-  const topicPages = pages.filter(
-    (page) => page.relativePath.startsWith("topics/"),
+  const topicPages = pages.filter((page) =>
+    page.relativePath.startsWith("topics/"),
   );
   const key = topicKeyFor(candidate);
   const exact = topicPages.find(
@@ -441,6 +445,7 @@ function mergeCandidateIntoTopicPage(
     ...arrayField(oldFields.sourceRefs),
     ...candidate.sourceRefs,
   ]).sort();
+  const title = stringField(oldFields.title) ?? displayName;
   const fields: Record<string, unknown> = {
     ...oldFields,
     confidence: weakestConfidence(
@@ -452,7 +457,7 @@ function mergeCandidateIntoTopicPage(
     sourceRefs,
     stableKeys,
     tags: unique([...arrayField(oldFields.tags), ...candidate.tags]).sort(),
-    title: stringField(oldFields.title) ?? displayName,
+    title,
     topicKey: stringField(oldFields.topicKey) ?? key,
     type: "Topic",
     volatile: oldFields.volatile === true || candidate.volatile,
@@ -476,7 +481,7 @@ function mergeCandidateIntoTopicPage(
     defaultStringType: "QUOTE_DOUBLE",
     lineWidth: 0,
   }).trimEnd();
-  return `---\n${frontmatter}\n---\n\n# ${fields.title}\n\n${body.trim()}\n`;
+  return `---\n${frontmatter}\n---\n\n# ${title}\n\n${body.trim()}\n`;
 }
 
 function findMatchingPage(
