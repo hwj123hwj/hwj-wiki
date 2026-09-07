@@ -447,7 +447,8 @@ openwiki --help                  # full help
 `openwiki search` searches the generated personal wiki plus configured Markdown roots. Use `--json` for HwjCode or other agents, and `--root PATH` for an external knowledge repository such as agent-lessons:
 
 ```sh
-OPENWIKI_AGENT_LESSONS_ROOT="$HOME/agent-lessons" \
+# Run from the hwj-wiki checkout, with agent-lessons beside it.
+OPENWIKI_AGENT_LESSONS_ROOT="$(cd ../agent-lessons && pwd -P)" \
 openwiki search "gateway archive" --json --limit 10
 ```
 
