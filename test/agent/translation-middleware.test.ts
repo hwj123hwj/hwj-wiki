@@ -134,6 +134,105 @@ describe("resolveTranslationPlan", () => {
 });
 
 describe("createWikiTranslationMiddleware beforeAgent", () => {
+  test("uses the complete source page as the factual translation boundary", async () => {
+    const { backend } = await setup();
+    const page = "/openwiki/page.md";
+    await backend.write(page, "# Page\n\nThe service starts.\n");
+    const { model, calls } = fakeModel((content) => `TRANSLATED\n${content}`);
+
+    await runBeforeAgent(
+      createWikiTranslationMiddleware(
+        backend,
+        "repository",
+        model,
+        switchTo("zh-CN"),
+        () => {},
+        () => {},
+      ),
+    );
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].human).toBe("# Page\n\nThe service starts.\n");
+    expect(calls[0].system).toContain("Preserve every fact's meaning");
+    expect(calls[0].system).not.toContain("Claims");
+  });
+
+  test("translates every visible Markdown page during a language switch", async () => {
+    const { backend } = await setup();
+    const freshPage = "/openwiki/fresh.md";
+    const stalePage = "/openwiki/stale.md";
+    const unresolvedPage = "/openwiki/unresolved.md";
+    const untrackedPage = "/openwiki/untracked.md";
+    const allPages = [freshPage, stalePage, unresolvedPage, untrackedPage];
+    for (const page of allPages) {
+      await backend.write(page, `# ${path.posix.basename(page)}\n`);
+    }
+    const { model, calls } = fakeModel((content) => `TRANSLATED\n${content}`);
+
+    await runBeforeAgent(
+      createWikiTranslationMiddleware(
+        backend,
+        "repository",
+        model,
+        switchTo("zh-CN"),
+        () => {},
+        () => {},
+      ),
+    );
+
+    expect(calls.map((call) => call.human)).toEqual([
+      "# fresh.md\n",
+      "# stale.md\n",
+      "# unresolved.md\n",
+      "# untracked.md\n",
+    ]);
+  });
+
+  test("persists a successful pending marker but not a refused marker write", async () => {
+    const successful = await setup();
+    const failed = await setup();
+    const page = "/openwiki/page.md";
+    for (const fixture of [successful, failed]) {
+      await fixture.backend.write(page, "# Page\n\nBody.\n");
+    }
+    vi.spyOn(failed.backend, "edit").mockResolvedValue({
+      error: "permission denied",
+    });
+    const brokenModel = {
+      invoke: () => Promise.reject(new Error("translator unavailable")),
+    } as unknown as BaseChatModel;
+
+    await runBeforeAgent(
+      createWikiTranslationMiddleware(
+        successful.backend,
+        "repository",
+        brokenModel,
+        switchTo("zh-CN"),
+        () => {},
+        () => {},
+      ),
+    );
+    await runBeforeAgent(
+      createWikiTranslationMiddleware(
+        failed.backend,
+        "repository",
+        brokenModel,
+        switchTo("zh-CN"),
+        () => {},
+        () => {},
+      ),
+    );
+
+    const successfulMarkdown = await readFile(
+      path.join(successful.rootDir, "openwiki/page.md"),
+      "utf8",
+    );
+    expect(successfulMarkdown).toContain("openwiki_translation_pending");
+    await expect(
+      readFile(path.join(failed.rootDir, "openwiki/page.md"), "utf8"),
+    ).resolves.not.toContain("openwiki_translation_pending");
+  });
+
   test("rewrites every eligible page and passes the original to the model", async () => {
     const { backend, rootDir } = await setup();
     await backend.write("/openwiki/quickstart.md", "# Quickstart\n\nHello.\n");
@@ -374,7 +473,7 @@ describe("createWikiTranslationMiddleware beforeAgent", () => {
     const dir = path.join(rootDir, "openwiki");
     await mkdir(path.join(dir, ".hidden"), { recursive: true });
     await backend.write("/openwiki/page.md", "# Page\n\nBody.\n");
-    for (const name of ["index.md", "log.md", "_plan.md", "INSTRUCTIONS.md"]) {
+    for (const name of ["index.md", "log.md", "INSTRUCTIONS.md"]) {
       await writeFile(path.join(dir, name), "# Control\n\nBody.\n");
     }
     await writeFile(path.join(dir, ".secret.md"), "# Secret\n\nBody.\n");

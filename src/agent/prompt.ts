@@ -24,9 +24,13 @@ export function createSystemPrompt(
   language?: string,
   openWikiIgnore?: OpenWikiIgnore,
 ): string {
+  if (outputMode === "repository" && command !== "chat") {
+    throw new Error("Repository generation does not use shared agent prompts.");
+  }
+
   const template =
     outputMode === "repository"
-      ? CODE_SYSTEM_PROMPTS[command]
+      ? CODE_SYSTEM_PROMPTS.chat
       : PERSONAL_SYSTEM_PROMPTS[command];
 
   const prompt = template
@@ -50,6 +54,16 @@ export function createSystemPrompt(
     : `${prompt}\n\n${createLinkIntegrityInstructions()}`.trim();
 }
 
+/**
+ * Builds the command-specific user prompt.
+ *
+ * @param command - Current OpenWiki command.
+ * @param context - Persisted run context.
+ * @param userMessage - Optional user instruction.
+ * @param outputMode - Current output target.
+ * @param runtimeRoot - Optional host runtime root.
+ * @returns Fully substituted user prompt.
+ */
 export function createUserPrompt(
   command: OpenWikiCommand,
   context: RunContext,
@@ -57,9 +71,13 @@ export function createUserPrompt(
   outputMode: OpenWikiOutputMode = "local-wiki",
   runtimeRoot?: string,
 ): string {
+  if (outputMode === "repository" && command !== "chat") {
+    throw new Error("Repository generation does not use shared agent prompts.");
+  }
+
   const template =
     outputMode === "repository"
-      ? CODE_USER_PROMPTS[command]
+      ? CODE_USER_PROMPTS.chat
       : PERSONAL_USER_PROMPTS[command];
 
   return template
@@ -83,7 +101,7 @@ export function formatRuntimeRootInstruction(
   outputMode: OpenWikiOutputMode,
 ): string {
   if (outputMode === "local-wiki") {
-    return "Filesystem tools use a virtual root: / means the local wiki directory above. Write wiki pages directly under /, for example /quickstart.md, /sources/gmail.md, and /_plan.md. Do not create a nested /openwiki directory.";
+    return "Filesystem tools use a virtual root: / means the local wiki directory above. Write wiki pages directly under /, for example /quickstart.md and /sources/gmail.md. Do not create a nested /openwiki directory.";
   }
 
   return "Filesystem tools use a virtual root: / means the repository root. The generated repository wiki lives under /openwiki, for example /openwiki/quickstart.md and /openwiki/architecture/overview.md. Inspect source files from repository-root paths such as /README.md, /src/agent/index.ts, and /package.json.";

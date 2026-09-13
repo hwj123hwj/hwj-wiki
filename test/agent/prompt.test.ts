@@ -21,7 +21,7 @@ function emptyContext(overrides: Partial<RunContext> = {}): RunContext {
 
 describe("createSystemPrompt output language", () => {
   test("instructs the agent to write wiki documentation in the selected language", () => {
-    const prompt = createSystemPrompt("init", "repository", "zh-CN");
+    const prompt = createSystemPrompt("init", "local-wiki", "zh-CN");
 
     expect(prompt).toContain("Output language:");
     expect(prompt).toContain(
@@ -53,7 +53,7 @@ describe("createSystemPrompt output language", () => {
   });
 
   test("preserves the existing prompt behavior when no language is supplied", () => {
-    expect(createSystemPrompt("init", "repository")).not.toContain(
+    expect(createSystemPrompt("init", "local-wiki")).not.toContain(
       "Output language:",
     );
   });
@@ -67,7 +67,7 @@ describe("createSystemPrompt output language", () => {
  * type non-absolute host paths into filesystem tools and crash the run.
  */
 describe("createSystemPrompt filesystem path guidance", () => {
-  const commands = ["init", "update", "chat"] as const;
+  const commands = ["chat"] as const;
 
   describe("repository mode", () => {
     for (const command of commands) {
@@ -126,7 +126,7 @@ describe("createSystemPrompt filesystem path guidance", () => {
     // warns against host *absolute* paths (/Users/...), since a repo has no
     // ~/.openwiki/wiki to confuse; local-wiki update additionally forbids ~ and
     // the wiki home. Both keep host paths out of the filesystem tools.
-    expect(createSystemPrompt("update", "repository")).toMatch(
+    expect(createSystemPrompt("chat", "repository")).toMatch(
       /Never pass host absolute paths like \/Users\/\.\.\. to filesystem tools/,
     );
     expect(createSystemPrompt("update", "local-wiki")).toMatch(
@@ -142,7 +142,7 @@ describe("createSystemPrompt filesystem path guidance", () => {
  * fills in over later runs instead of code guessing forever.
  */
 describe("createSystemPrompt openwiki_generated enrichment guidance", () => {
-  for (const outputMode of ["repository", "local-wiki"] as const) {
+  for (const outputMode of ["local-wiki"] as const) {
     test(`${outputMode} mode: instructs the agent to enrich and clear the mark`, () => {
       const prompt = createSystemPrompt("update", outputMode);
 
@@ -159,7 +159,7 @@ describe("createSystemPrompt openwiki_generated enrichment guidance", () => {
  * it alone so the model never adds, edits, or clears a marker code manages.
  */
 describe("createSystemPrompt translation-marker guidance", () => {
-  for (const outputMode of ["repository", "local-wiki"] as const) {
+  for (const outputMode of ["local-wiki"] as const) {
     test(`${outputMode} mode: tells the agent to ignore the pending marker`, () => {
       const prompt = createSystemPrompt("update", outputMode);
 
@@ -219,23 +219,21 @@ describe("createUserPrompt", () => {
     );
   });
 
-  test("init embeds the wiki goal for the resolved subject", () => {
-    const prompt = createUserPrompt(
-      "init",
-      emptyContext({ wikiGoal: "Explain the CLI" }),
-      null,
-      "repository",
-    );
+  test("rejects repository init before building a user prompt", () => {
+    expect(() =>
+      createUserPrompt(
+        "init",
+        emptyContext({ wikiGoal: "Explain the CLI" }),
+        null,
+        "repository",
+      ),
+    ).toThrow("Repository generation does not use shared agent prompts.");
+  });
 
-    expect(prompt).toContain("Initialize OpenWiki documentation for");
-    // Repository mode resolves the subject to the repo, not the personal brain.
-    expect(prompt).toContain("this repository");
-    // The wiki goal is interpolated into the brief; the git summary is not part
-    // of the user prompt (it rides the run context for the agent, not the
-    // template), so only the goal is asserted here.
-    expect(prompt).toContain("Explain the CLI");
-    // No user message means no appended instruction block.
-    expect(prompt).not.toContain("Additional user instruction:");
+  test("rejects repository init before building a system prompt", () => {
+    expect(() => createSystemPrompt("init", "repository")).toThrow(
+      "Repository generation does not use shared agent prompts.",
+    );
   });
 
   test("init uses the personal-brain subject label in local-wiki mode", () => {
@@ -276,18 +274,34 @@ describe("createUserPrompt", () => {
     expect(prompt).toContain("No previous OpenWiki update metadata was found.");
   });
 
-  test("appends a trimmed user instruction block when a message is supplied", () => {
+  test("appends a trimmed user instruction block for local-wiki generation", () => {
     const prompt = createUserPrompt(
       "init",
       emptyContext(),
       "  focus on auth  ",
-      "repository",
+      "local-wiki",
     );
 
     expect(prompt).toContain("Additional user instruction:");
     expect(prompt).toContain("focus on auth");
     // The block is trimmed, so no leading/trailing whitespace leaks through.
     expect(prompt).not.toContain("  focus on auth  ");
+  });
+
+  test("rejects repository update before building a user prompt", () => {
+    expect(() =>
+      createUserPrompt("update", emptyContext(), null, "repository", "/repo"),
+    ).toThrow("Repository generation does not use shared agent prompts.");
+  });
+});
+
+describe("createSystemPrompt repository generation guards", () => {
+  test("rejects repository init and update", () => {
+    for (const command of ["init", "update"] as const) {
+      expect(() => createSystemPrompt(command, "repository")).toThrow(
+        "Repository generation does not use shared agent prompts.",
+      );
+    }
   });
 });
 

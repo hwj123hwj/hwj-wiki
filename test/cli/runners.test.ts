@@ -26,6 +26,7 @@ vi.mock("../../src/auth/oauth.ts", () => ({
 }));
 vi.mock("../../src/agent/index.ts", () => ({
   createOpenWikiThreadId: vi.fn(() => "thread-1"),
+  runOpenWikiAgent: vi.fn(),
 }));
 vi.mock("../../src/personalization/run.ts", () => ({
   runPersonalizedOpenWikiAgent: vi.fn(),
@@ -485,6 +486,65 @@ describe("runAuthCommand", () => {
 });
 
 describe("runPrintCommand", () => {
+  test("prints native repository lifecycle progress without tool transcripts", async () => {
+    vi.mocked(runPersonalizedOpenWikiAgent).mockImplementation(
+      (
+        _command: unknown,
+        _cwd: unknown,
+        options: { onEvent?: (event: unknown) => void },
+      ) => {
+        options.onEvent?.({
+          type: "repository_progress",
+          stage: "planning",
+          resumed: false,
+        });
+        options.onEvent?.({
+          type: "tool_start",
+          call: "read_file(/README.md)",
+          id: "read-1",
+          input: { path: "/README.md" },
+          name: "read_file",
+        });
+        options.onEvent?.({
+          type: "repository_progress",
+          stage: "generating",
+          page: "/openwiki/quickstart.md",
+          pageIndex: 1,
+          pageCount: 1,
+        });
+        options.onEvent?.({
+          type: "repository_progress",
+          stage: "finalizing",
+        });
+        return Promise.resolve(undefined as never);
+      },
+    );
+
+    await runPrintCommand(
+      makeCommand("run", {
+        command: "init",
+        dryRun: false,
+        language: null,
+        mode: "code",
+        modeSource: "option",
+        modelId: null,
+        print: true,
+        shouldStart: true,
+        userMessage: null,
+        telemetryFile: null,
+      }),
+    );
+
+    const output = stdout.join("");
+    expect(output).toContain("Planning repository wiki");
+    expect(output).toContain(
+      "Documenting page 1 of 1 · /openwiki/quickstart.md",
+    );
+    expect(output).toContain("Finalizing repository wiki");
+    expect(output).not.toContain("read_file");
+    expect(output).not.toContain("tool_start");
+  });
+
   test("runs the agent, prints collected text, and exits 0", async () => {
     vi.mocked(runPersonalizedOpenWikiAgent).mockImplementation(
       (
@@ -502,7 +562,6 @@ describe("runPrintCommand", () => {
         command: "update",
         dryRun: false,
         language: null,
-        languageWarning: null,
         mode: "personal",
         modeSource: "default",
         modelId: null,
@@ -528,7 +587,6 @@ describe("runPrintCommand", () => {
         command: "init",
         dryRun: false,
         language: null,
-        languageWarning: null,
         mode: "code",
         modeSource: "option",
         modelId: null,
@@ -562,7 +620,6 @@ describe("runPrintCommand", () => {
         command: "update",
         dryRun: false,
         language: null,
-        languageWarning: null,
         mode: "personal",
         modeSource: "default",
         modelId: null,

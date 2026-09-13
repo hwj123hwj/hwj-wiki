@@ -1,5 +1,6 @@
 import type React from "react";
 import { Box, Text } from "ink";
+import { openWikiEnvDisplayPath } from "../../config/openwiki-home.js";
 import {
   DEFAULT_PROVIDER,
   DEFAULT_VERTEX_LOCATION,
@@ -33,6 +34,7 @@ import {
   getFinalOptionLabel,
   getLangsmithRegionLabel,
   getModelSelectionOptions,
+  type ReasoningEffortSelectionOption,
   getProviderArticle,
   getSourceDescriptionPrompt,
   getSourceInstanceCount,
@@ -85,6 +87,8 @@ export function Prompt({
   langsmithWorkspaceSelectionIndex,
   langsmithWorkspaces,
   modelSelectionIndex,
+  reasoningEffortOptions = [],
+  reasoningEffortSelectionIndex = 0,
   onboardingConfig,
   powerModeSelectionIndex,
   provider,
@@ -118,6 +122,8 @@ export function Prompt({
   langsmithWorkspaceSelectionIndex: number;
   langsmithWorkspaces: LangsmithWorkspaceDraft[];
   modelSelectionIndex: number;
+  reasoningEffortOptions?: readonly ReasoningEffortSelectionOption[];
+  reasoningEffortSelectionIndex?: number;
   onboardingConfig: OpenWikiOnboardingConfig;
   powerModeSelectionIndex: number;
   provider: OpenWikiProvider;
@@ -337,6 +343,26 @@ export function Prompt({
             </Text>
           );
         })}
+        <Text color="gray">Use up/down arrows, then press Enter.</Text>
+      </Box>
+    );
+  }
+
+  if (step === "reasoning-effort") {
+    return (
+      <Box flexDirection="column">
+        <Text>Choose the reasoning effort for this model.</Text>
+        {reasoningEffortOptions.map((option, index) => (
+          <Text key={option.value || "provider-default"}>
+            <SelectionMarker
+              isSelected={index === reasoningEffortSelectionIndex}
+            />{" "}
+            {option.label}
+            {option.value === "" ? (
+              <Text color="gray"> preserves the provider setting</Text>
+            ) : null}
+          </Text>
+        ))}
         <Text color="gray">Use up/down arrows, then press Enter.</Text>
       </Box>
     );
@@ -681,7 +707,7 @@ export function Prompt({
         <Text>LangSmith API key for this workspace.</Text>
         <Text color="gray">
           The connector&apos;s own read key (not your app&apos;s tracing key).
-          Saved to ~/.openwiki/.env as {apiKeyEnv}, never committed.
+          Saved to {openWikiEnvDisplayPath} as {apiKeyEnv}, never committed.
         </Text>
         <BorderedInput
           maxDisplayWidth={inputDisplayWidth}

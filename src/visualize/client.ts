@@ -6,6 +6,7 @@ import {
   matchesFilter,
   nodeRadius,
   normalize,
+  shouldShowNodeLabel,
   signature,
   stripFrontmatter,
 } from "./client-lib.js";
@@ -204,11 +205,6 @@ interface ForceGraphInstance {
   onNodeHover(handler: (node: GraphNode | null) => void): ForceGraphInstance;
 
   /**
-   * Register the background (empty space) click handler.
-   */
-  onBackgroundClick(handler: () => void): ForceGraphInstance;
-
-  /**
    * Set the canvas width in pixels.
    */
   width(width: number): ForceGraphInstance;
@@ -217,6 +213,13 @@ interface ForceGraphInstance {
    * Set the canvas height in pixels.
    */
   height(height: number): ForceGraphInstance;
+
+  /**
+   * Stop and restart the render loop. Resuming paints a frame immediately,
+   * which keeps canvas reallocations from becoming visible between frames.
+   */
+  pauseAnimation(): ForceGraphInstance;
+  resumeAnimation(): ForceGraphInstance;
 
   /**
    * Set the zoom level (higher is more zoomed in).
@@ -303,6 +306,11 @@ let current: string | null = null;
 let readerId: string | null = null;
 
 /**
+ * Id of the node under the pointer, used only for contextual label display.
+ */
+let hoverId: string | null = null;
+
+/**
  * Id of the entry page, drawn larger and always labelled, or null before load.
  */
 let anchorId: string | null = null;
@@ -321,6 +329,12 @@ const filterQ = "";
  * Active type filter. Reserved for a future filter UI; "" means "match all".
  */
 const filterType = "";
+
+/** True when this client was emitted as a static visualizer export. */
+const isStaticExport = document.documentElement.dataset.staticExport === "true";
+
+/** Static exports carry their graph beside the client; live mode uses the server route. */
+const graphUrl = isStaticExport ? "./graph.json" : "/api/graph";
 
 /**
  * Persisted render-node objects keyed by id, reused across reloads so layout holds.
@@ -371,11 +385,6 @@ const edgeColor = (): string => cssVar("--edge");
  * The current graph-canvas background color.
  */
 const graphBg = (): string => cssVar("--graph-bg");
-
-/**
- * The reader panel's empty-state markup, captured before any page is rendered.
- */
-const EMPTY_HTML = $("#detail").innerHTML;
 
 /**
  * Whether a node is the entry (anchor) page.
@@ -522,13 +531,24 @@ function initGraph(): void {
     .linkDirectionalParticleSpeed(0.006)
     .linkDirectionalParticleColor(() => "#7FC8FF")
     .onNodeClick((n) => selectNode(n.id))
-    .onNodeHover(hoverHighlight)
-    .onBackgroundClick(clearSelection);
+    .onNodeHover(hoverHighlight);
+  // Deliberately NO onBackgroundClick handler: clicking empty graph space must
+  // not change any page state (issue #670). Clearing the selection/reader on a
+  // stray click made the open page vanish, so background clicks are a no-op.
 
   // Pin the canvas to its column. Without this, force-graph falls back to the
   // window width and centres the graph behind the reader/index panels.
   const fitSize = (): void => {
-    if (G) G.width(container.clientWidth).height(container.clientHeight);
+    if (!G) return;
+
+    // Setting a canvas width clears its pixels. ResizeObserver runs late in the
+    // browser's paint cycle, so leaving the normal animation loop in charge can
+    // expose that cleared frame while the splitter is moving. Restarting the
+    // loop makes force-graph repaint synchronously at the new size.
+    G.pauseAnimation()
+      .width(container.clientWidth)
+      .height(container.clientHeight)
+      .resumeAnimation();
   };
   fitSize();
   new ResizeObserver(fitSize).observe(container);
@@ -576,9 +596,15 @@ function paintNode(
     ctx.stroke();
   }
 
-  // Label: always drawn when zoomed in enough (or for notable nodes), with a
-  // dark halo behind the text so it stays readable over links and glows.
-  if (scale > 0.5 || sel || hot || n.anchor) {
+  // Label: contextual only. The sidebar is the always-visible index; the graph
+  // labels the current interaction target or selected neighbourhood.
+  if (
+    shouldShowNodeLabel(n, {
+      selectedId: current,
+      hoveredId: hoverId,
+      isInSelectedNeighborhood: hot,
+    })
+  ) {
     const fs = Math.max(10 / scale, 3.2);
     ctx.font = `${sel || n.anchor ? 700 : 600} ${fs}px Inter, sans-serif`;
     ctx.textAlign = "center";
@@ -623,9 +649,10 @@ function neighborsOf(node: GraphNode | undefined): void {
  * Highlight a node's neighbourhood on hover, unless a page is already selected.
  */
 function hoverHighlight(node: GraphNode | null): void {
-  if (current) return; // a selected page keeps its own highlight
-  neighborsOf(node ?? undefined);
   $("#graph").style.cursor = node ? "pointer" : "";
+  if (current) return; // a selected page keeps its own highlight
+  hoverId = node?.id ?? null;
+  neighborsOf(node ?? undefined);
 }
 
 // --- Selection and reader ---------------------------------------------------
@@ -638,20 +665,9 @@ function hoverHighlight(node: GraphNode | null): void {
  */
 function selectNode(id: string): void {
   current = id;
+  hoverId = null;
   neighborsOf(nodeById.get(id));
   renderReader(id);
-}
-
-/**
- * Clear the selection and restore the reader's empty state.
- */
-function clearSelection(): void {
-  current = null;
-  readerId = null;
-  highlightNodes.clear();
-  highlightLinks.clear();
-  $("#detail").innerHTML = EMPTY_HTML;
-  refreshSidebarActive();
 }
 
 /**
@@ -774,7 +790,7 @@ function toggleTheme(): void {
  * when the topology is unchanged, so a live reload does not snap the graph.
  */
 async function load(firstTime: boolean): Promise<void> {
-  const res = await fetch("/api/graph");
+  const res = await fetch(graphUrl);
   graph = (await res.json()) as WikiGraph;
   $("#wiki-name").textContent = `${graph.root} · ${graph.nodes.length} pages`;
   const entry =
@@ -876,11 +892,80 @@ function connectSSE(): void {
   };
 }
 
+// --- Graph panel: resizable splitter + collapse-to-fullscreen-doc toggle ----
+
+/**
+ * Lets the graph column be resized by dragging, or collapsed entirely so the
+ * reader takes the full width. Width is stored as a percentage of the main
+ * row (not raw pixels) so it keeps behaving sanely across window resizes, and
+ * persists in localStorage across reloads.
+ */
+function initGraphPanelControls(): void {
+  const mainEl = $("#main");
+  const graphEl = $("#graph");
+  const splitterEl = $("#splitter");
+  const toggleBtn = $("#toggle-graph");
+  const overlayEl = $("#graph-overlay");
+  const WIDTH_KEY = "openwiki-graph-width";
+  const COLLAPSED_KEY = "openwiki-graph-collapsed";
+
+  let lastWidth = localStorage.getItem(WIDTH_KEY) || "50%";
+  let collapsed = localStorage.getItem(COLLAPSED_KEY) === "1";
+
+  function setCollapsed(next: boolean): void {
+    collapsed = next;
+    localStorage.setItem(COLLAPSED_KEY, collapsed ? "1" : "0");
+    graphEl.style.width = collapsed ? "0px" : lastWidth;
+    splitterEl.classList.toggle("hidden", collapsed);
+    overlayEl.style.display = collapsed ? "none" : "";
+    toggleBtn.classList.toggle("active", collapsed);
+    toggleBtn.title = collapsed ? "Show graph" : "Hide graph";
+  }
+  setCollapsed(collapsed);
+
+  toggleBtn.addEventListener("click", () => setCollapsed(!collapsed));
+  splitterEl.addEventListener("dblclick", () => setCollapsed(!collapsed));
+
+  let dragging = false;
+  splitterEl.addEventListener("mousedown", (e) => {
+    if (collapsed) return;
+    dragging = true;
+    splitterEl.classList.add("dragging");
+    mainEl.classList.add("dragging");
+    e.preventDefault();
+  });
+  window.addEventListener("mousemove", (e) => {
+    if (!dragging) return;
+    const mainRect = mainEl.getBoundingClientRect();
+    const sidebarWidth = $("#sidebar").getBoundingClientRect().width;
+    const avail = mainRect.width - sidebarWidth;
+    const minPx = 80;
+    const maxPx = Math.max(minPx, avail - 260); // keep room for the reader
+    let px = e.clientX - mainRect.left - sidebarWidth;
+    px = Math.max(minPx, Math.min(px, maxPx));
+    // % is resolved by the browser against the flex container's full width
+    // (mainRect.width, sidebar included), not just the space left after the
+    // sidebar — divide by the same basis or the graph silently overshoots
+    // into the reader's space as the sidebar eats a bigger share of the row.
+    lastWidth = `${((px / mainRect.width) * 100).toFixed(2)}%`;
+    graphEl.style.width = lastWidth;
+  });
+  window.addEventListener("mouseup", () => {
+    if (!dragging) return;
+    dragging = false;
+    splitterEl.classList.remove("dragging");
+    mainEl.classList.remove("dragging");
+    localStorage.setItem(WIDTH_KEY, lastWidth);
+  });
+}
+
 // --- Bootstrap --------------------------------------------------------------
 
-// Wire the theme toggle, configure the markdown/diagram libraries, then do the
-// first load and open the live-reload stream.
+// Wire the theme toggle and load the graph. Only the live server supplies SSE reloads.
 $("#theme").addEventListener("click", toggleTheme);
+initGraphPanelControls();
 mermaid.initialize({ startOnLoad: false, theme: "dark" });
 marked.setOptions({ breaks: false, gfm: true });
-void load(true).then(connectSSE);
+void load(true).then(() => {
+  if (!isStaticExport) connectSSE();
+});
