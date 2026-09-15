@@ -1,4 +1,5 @@
 import { isValidModelId, normalizeModelId } from "../config/constants.js";
+import { openWikiLocalWikiDisplayPath } from "../config/openwiki-home.js";
 import type { OpenWikiCommand } from "../agent/types.js";
 import { resolveLanguage } from "../platform/language.js";
 import { isAuthProviderId } from "../auth/providers.js";
@@ -7,6 +8,15 @@ import {
   parseIngestionTarget,
   type IngestionTarget,
 } from "../ingestion/ingestion.js";
+import {
+  getHostTarget,
+  listHostTargets,
+} from "../integrations/install/registry.js";
+import type {
+  HostIntegrationScope,
+  HostTargetId,
+} from "../integrations/install/types.js";
+import { isValidHostId } from "../integrations/core/protocol.js";
 
 export type HelpRow = {
   label: string;
@@ -27,7 +37,75 @@ export type HelpContent = {
   developmentExamples: string[];
 };
 
+/**
+ * Parsed host-integration installation command.
+ */
+export interface IntegrationsCliCommand {
+  /**
+   * CLI dispatch discriminator.
+   */
+  kind: "integrations";
+
+  /**
+   * Registry operation requested by the user.
+   */
+  action: "install" | "list" | "uninstall";
+
+  /**
+   * Initial process exit code.
+   */
+  exitCode: 0;
+
+  /**
+   * Selected host, or `null` for the list action.
+   */
+  target: HostTargetId | null;
+
+  /**
+   * Ownership scope selected for the operation.
+   */
+  scope: HostIntegrationScope;
+
+  /**
+   * Optional project root supplied with `--project`.
+   *
+   * @default null - user scope is selected and the user's home is used.
+   */
+  projectRoot: string | null;
+
+  /**
+   * Whether install may replace unmanaged skill content.
+   */
+  force: boolean;
+}
+
+/**
+ * Parsed internal MCP server command.
+ */
+export interface McpCliCommand {
+  /**
+   * CLI dispatch discriminator.
+   */
+  kind: "mcp";
+
+  /**
+   * Initial process exit code.
+   */
+  exitCode: 0;
+
+  /**
+   * Host identifier written to run metadata.
+   */
+  host: string;
+}
+
+/**
+ * Host-integration commands added to the root CLI union.
+ */
+export type HostIntegrationCliCommand = IntegrationsCliCommand | McpCliCommand;
+
 export type CliCommand =
+  | HostIntegrationCliCommand
   | {
       kind: "auth";
       action: "configure" | "list" | "oauth" | "tools";
@@ -48,6 +126,7 @@ export type CliCommand =
       wikiDir: string;
       port: number;
       open: boolean;
+      exportDir: string | null;
     }
   | {
       kind: "ingest";
@@ -78,7 +157,6 @@ export type CliCommand =
       command: OpenWikiCommand;
       dryRun: boolean;
       language: string | null;
-      languageWarning: string | null;
       mode: OpenWikiRunMode;
       modeSource: OpenWikiRunModeSource;
       modelId: string | null;
@@ -98,6 +176,14 @@ export type OpenWikiRunModeSource = "default" | "option" | "positional";
 export function parseCommand(argv: string[]): CliCommand {
   if (argv[0] === "--help" || argv[0] === "-h") {
     return { kind: "help", exitCode: 0 };
+  }
+
+  if (argv[0] === "integrations") {
+    return parseIntegrationsCommand(argv.slice(1));
+  }
+
+  if (argv[0] === "mcp") {
+    return parseMcpCommand(argv.slice(1));
   }
 
   if (argv[0] === "search" || argv[0] === "knowledge") {
@@ -307,6 +393,9 @@ export function parseCommand(argv: string[]): CliCommand {
     let wikiDir = "openwiki";
     let port = 4321;
     let open = true;
+    let exportDir: string | null = null;
+    let sawPort = false;
+    let sawNoOpen = false;
     let sawPositional = false;
     const optionArgs = argv.slice(1);
 
@@ -315,6 +404,7 @@ export function parseCommand(argv: string[]): CliCommand {
 
       if (arg === "--no-open") {
         open = false;
+        sawNoOpen = true;
         continue;
       }
 
@@ -328,12 +418,41 @@ export function parseCommand(argv: string[]): CliCommand {
           };
         }
         port = Number(rawPort);
+        sawPort = true;
         index += 1;
         continue;
       }
 
       if (arg.startsWith("--port=")) {
         port = Number(arg.slice("--port=".length));
+        sawPort = true;
+        continue;
+      }
+
+      if (arg === "--export") {
+        const outputDir = optionArgs[index + 1];
+        if (!outputDir || outputDir.startsWith("-")) {
+          return {
+            kind: "error",
+            exitCode: 1,
+            message: "--export requires a directory.",
+          };
+        }
+        exportDir = outputDir;
+        index += 1;
+        continue;
+      }
+
+      if (arg.startsWith("--export=")) {
+        const outputDir = arg.slice("--export=".length);
+        if (!outputDir) {
+          return {
+            kind: "error",
+            exitCode: 1,
+            message: "--export requires a directory.",
+          };
+        }
+        exportDir = outputDir;
         continue;
       }
 
@@ -350,6 +469,14 @@ export function parseCommand(argv: string[]): CliCommand {
       };
     }
 
+    if (exportDir && (sawPort || sawNoOpen)) {
+      return {
+        kind: "error",
+        exitCode: 1,
+        message: "--export cannot be combined with --port or --no-open.",
+      };
+    }
+
     if (!Number.isInteger(port) || port < 1024 || port > 65535) {
       return {
         kind: "error",
@@ -358,7 +485,7 @@ export function parseCommand(argv: string[]): CliCommand {
       };
     }
 
-    return { kind: "visualize", exitCode: 0, wikiDir, port, open };
+    return { kind: "visualize", exitCode: 0, wikiDir, port, open, exportDir };
   }
 
   if (argv[0] === "ingest") {
@@ -488,6 +615,208 @@ export function parseCommand(argv: string[]): CliCommand {
   }
 
   return parseRunCommand(argv, "code", "default");
+}
+
+/**
+ * Parses one registry-driven host integration command.
+ *
+ * @param argv - Arguments following the `integrations` command.
+ * @returns Parsed integration command or a stable CLI error.
+ */
+function parseIntegrationsCommand(argv: string[]): CliCommand {
+  const action = argv[0];
+  if (action !== "install" && action !== "list" && action !== "uninstall") {
+    return integrationUsageError();
+  }
+
+  let target: HostTargetId | null = null;
+  let argumentIndex = 1;
+  if (action !== "list") {
+    const rawTarget = argv[1];
+    if (!rawTarget || rawTarget.startsWith("-")) {
+      return {
+        kind: "error",
+        exitCode: 1,
+        message: `Integration target is required. Supported targets: ${formatSupportedHostTargets()}.`,
+      };
+    }
+    const resolvedTarget = getHostTarget(rawTarget);
+    if (!resolvedTarget) {
+      return {
+        kind: "error",
+        exitCode: 1,
+        message: `Unknown integration target: ${rawTarget}. Supported targets: ${formatSupportedHostTargets()}.`,
+      };
+    }
+    target = resolvedTarget.id;
+    argumentIndex = 2;
+  }
+
+  let force = false;
+  let scope: HostIntegrationScope = "user";
+  let projectRoot: string | null = null;
+  let sawProject = false;
+  const options = argv.slice(argumentIndex);
+  for (let index = 0; index < options.length; index += 1) {
+    const arg = options[index];
+    if (arg === "--force") {
+      if (action !== "install") {
+        return {
+          kind: "error",
+          exitCode: 1,
+          message: "--force is only valid for integrations install.",
+        };
+      }
+      if (force) {
+        return {
+          kind: "error",
+          exitCode: 1,
+          message: "--force may only be specified once.",
+        };
+      }
+      force = true;
+      continue;
+    }
+
+    if (arg === "--project" || arg.startsWith("--project=")) {
+      if (sawProject) {
+        return {
+          kind: "error",
+          exitCode: 1,
+          message: "--project may only be specified once.",
+        };
+      }
+      sawProject = true;
+      scope = "project";
+      if (arg.startsWith("--project=")) {
+        const value = arg.slice("--project=".length);
+        if (!value) {
+          return {
+            kind: "error",
+            exitCode: 1,
+            message: "--project= requires a path.",
+          };
+        }
+        projectRoot = value;
+        continue;
+      }
+
+      const value = options[index + 1];
+      if (value && !value.startsWith("-")) {
+        projectRoot = value;
+        index += 1;
+      } else {
+        projectRoot = ".";
+      }
+      continue;
+    }
+
+    if (arg.startsWith("-")) {
+      return {
+        kind: "error",
+        exitCode: 1,
+        message: `Unknown option for integrations: ${arg}`,
+      };
+    }
+    return {
+      kind: "error",
+      exitCode: 1,
+      message: "Project paths must follow --project.",
+    };
+  }
+
+  return {
+    kind: "integrations",
+    action,
+    exitCode: 0,
+    target,
+    scope,
+    projectRoot,
+    force,
+  };
+}
+
+/**
+ * Parses the internal rootless MCP server command.
+ *
+ * @param argv - Arguments following the `mcp` command.
+ * @returns Parsed MCP command or a stable CLI error.
+ */
+function parseMcpCommand(argv: string[]): CliCommand {
+  let host = "unknown";
+  let sawHost = false;
+
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (arg === "--host" || arg.startsWith("--host=")) {
+      if (sawHost) {
+        return {
+          kind: "error",
+          exitCode: 1,
+          message: "--host may only be specified once.",
+        };
+      }
+      const value =
+        arg === "--host" ? argv[index + 1] : arg.slice("--host=".length);
+      if (!value || value.startsWith("-")) {
+        return {
+          kind: "error",
+          exitCode: 1,
+          message: "--host requires a host identifier.",
+        };
+      }
+      if (!isValidHostId(value)) {
+        return {
+          kind: "error",
+          exitCode: 1,
+          message:
+            "--host must contain 1-64 lowercase letters, digits, or hyphens.",
+        };
+      }
+      host = value;
+      sawHost = true;
+      if (arg === "--host") index += 1;
+      continue;
+    }
+
+    return {
+      kind: "error",
+      exitCode: 1,
+      message: arg.startsWith("-")
+        ? `Unknown option for mcp: ${arg}`
+        : `Unexpected argument for mcp: ${arg}`,
+    };
+  }
+
+  return { kind: "mcp", exitCode: 0, host };
+}
+
+/**
+ * Builds the registry-derived integration usage error.
+ *
+ * @returns CLI error containing every currently supported host target.
+ */
+function integrationUsageError(): CliCommand {
+  return {
+    kind: "error",
+    exitCode: 1,
+    message:
+      "Usage: openwiki integrations list [--project [path]] | " +
+      `install <${formatSupportedHostTargets("|")}> [--force] [--project [path]] | ` +
+      `uninstall <${formatSupportedHostTargets("|")}> [--project [path]]`,
+  };
+}
+
+/**
+ * Formats supported host IDs directly from the installation registry.
+ *
+ * @param separator - Text placed between host identifiers.
+ * @returns Registry host IDs in stable display order.
+ */
+function formatSupportedHostTargets(separator = ", "): string {
+  return listHostTargets()
+    .map((target) => target.id)
+    .join(separator);
 }
 
 function parseRunCommand(
@@ -722,9 +1051,18 @@ function parseRunCommand(
     userMessageParts.length > 0 ? userMessageParts.join(" ") : null;
   const shouldStart = command !== "chat" || userMessage !== null;
 
-  // Canonicalize the requested locale here so an unrecognized value is dropped
-  // (and surfaced as a warning) before it reaches the run or persisted state.
+  // Reject an unrecognized locale here, before it can reach the run or any
+  // persisted state. Generating an English wiki from a typo is never what the
+  // caller asked for, and run state records the language it started with.
   const resolvedLanguage = resolveLanguage(language);
+
+  if (resolvedLanguage.kind === "unrecognized") {
+    return {
+      kind: "error",
+      exitCode: 1,
+      message: resolvedLanguage.message,
+    };
+  }
 
   if (command !== "chat" && modeSource === "default") {
     mode = "code";
@@ -743,8 +1081,8 @@ function parseRunCommand(
     exitCode: 0,
     command,
     dryRun,
-    language: resolvedLanguage.language ?? null,
-    languageWarning: resolvedLanguage.warning ?? null,
+    language:
+      resolvedLanguage.kind === "resolved" ? resolvedLanguage.language : null,
     mode,
     modeSource,
     modelId,
@@ -816,6 +1154,25 @@ export function commandEmitsTelemetry(command: CliCommand): boolean {
   );
 }
 
+/**
+ * True when a command needs credentials from OpenWiki's private environment.
+ * Host integration and MCP commands deliberately use the host's authenticated
+ * session and never load OpenWiki model credentials.
+ *
+ * @param command - Parsed command to inspect.
+ * @returns Whether the CLI should load the OpenWiki environment.
+ */
+export function commandLoadsEnvironment(command: CliCommand): boolean {
+  return (
+    (command.kind === "run" && !command.dryRun) ||
+    command.kind === "auth" ||
+    command.kind === "cron" ||
+    command.kind === "ingest" ||
+    command.kind === "search" ||
+    command.kind === "ngrok"
+  );
+}
+
 export const helpContent: HelpContent = {
   title: "OpenWiki",
   description:
@@ -839,7 +1196,10 @@ export const helpContent: HelpContent = {
     "openwiki cron resume all",
     "openwiki cron delete all",
     "openwiki ngrok start [url] [--port <port>]",
-    "openwiki visualize [path] [--port <port>] [--no-open]",
+    "openwiki visualize [path] [--port <port>] [--no-open] [--export <dir>]",
+    "openwiki integrations list [--project [path]]",
+    `openwiki integrations install <${formatSupportedHostTargets("|")}> [--force] [--project [path]]`,
+    `openwiki integrations uninstall <${formatSupportedHostTargets("|")}> [--project [path]]`,
   ],
   commands: [
     {
@@ -849,8 +1209,7 @@ export const helpContent: HelpContent = {
     },
     {
       label: "openwiki personal",
-      description:
-        "Run OpenWiki as your local personal brain over configured sources, writing to ~/.openwiki/wiki.",
+      description: `Run OpenWiki as your local personal brain over configured sources, writing to ${openWikiLocalWikiDisplayPath}.`,
     },
     {
       label: "openwiki",
@@ -906,16 +1265,31 @@ export const helpContent: HelpContent = {
         "Start an ngrok tunnel for Slack OAuth, optionally using a fixed HTTPS URL.",
     },
     {
-      label: "openwiki visualize [path]",
+      label: "openwiki visualize [path] [--export <dir>]",
       description:
-        "Serve an interactive graph and live docs reader for a generated wiki (defaults to ./openwiki).",
+        "Serve a live graph and reader, or export a static graph for web hosting (defaults to ./openwiki).",
+    },
+    {
+      label: "openwiki integrations list [--project [path]]",
+      description:
+        "Show user-level OpenWiki installation status, or project status with --project.",
+    },
+    {
+      label: "openwiki integrations install <host> [--project [path]]",
+      description:
+        "Install the OpenWiki skill and MCP config globally, or into one project with --project.",
+    },
+    {
+      label: "openwiki integrations uninstall <host> [--project [path]]",
+      description:
+        "Safely remove a global integration, or a project integration with --project.",
     },
   ],
   options: [
     {
       label: "--init",
       description:
-        "Generate initial OpenWiki documentation. Defaults to code mode; use personal to initialize the local personal brain.",
+        "Generate repository documentation from scratch, replacing an existing generated wiki while preserving openwiki/INSTRUCTIONS.md. Defaults to code mode; use personal to initialize the local personal brain.",
     },
     {
       label: "--update",
@@ -930,7 +1304,7 @@ export const helpContent: HelpContent = {
     {
       label: "-l, --language <locale>",
       description:
-        "Generate wiki documentation in the requested language or locale.",
+        "Generate wiki documentation in the given BCP-47 locale, for example ko, zh-CN, or pt-BR.",
     },
     {
       label: "-p, --print",
@@ -976,6 +1350,11 @@ export const helpContent: HelpContent = {
       label: "--no-open",
       description: "For visualize: do not open the browser automatically.",
     },
+    {
+      label: "--export <dir>",
+      description:
+        "For visualize: write a static visualizer directory instead of starting the local server.",
+    },
   ],
   developmentOptions: [
     {
@@ -1011,6 +1390,10 @@ export const helpContent: HelpContent = {
     "openwiki ngrok start https://openwiki.ngrok.app",
     "openwiki visualize",
     "openwiki visualize openwiki --port 4400 --no-open",
+    "openwiki visualize openwiki --export docs/openwiki-visualizer",
+    "openwiki integrations list",
+    "openwiki integrations install codex",
+    "openwiki integrations uninstall codex",
   ],
   developmentExamples: ["openwiki --dry-run"],
 };

@@ -1,179 +1,218 @@
 ---
-type: Quickstart Guide
+type: orientation-guide
 title: OpenWiki Quickstart
-description: Quickstart reference for the OpenWiki TypeScript CLI, including documentation-generation workflows, supported model providers, and the primary source files. Use it to navigate the repository's architecture, commands, agent runtime, operations, and connectors.
-tags: [openwiki, quickstart, cli, documentation]
+description: Entry-point orientation for a coding agent working on the OpenWiki CLI codebase, with a task-routing map into the architecture, workflow, concept, operations, integration, and testing pages.
+tags: [openwiki, quickstart, cli, orientation, task-routing, deepagents]
+sources:
+  - id: openwiki-source-8037e2358a2c4f9b2c722a11
+    resource: repo://AGENTS.md
+  - id: openwiki-source-f317ee207e1653d2033c81a4
+    resource: repo://CONTRIBUTING.md
+  - id: openwiki-source-5b54a58d1b51cd490b0e7162
+    resource: repo://package.json
+  - id: openwiki-source-23775c3de52f3ab95a13cb8b
+    resource: repo://README.md
+  - id: openwiki-source-6cb3236b8c1412a26d832fcf
+    resource: repo://src/agent/repository-runner.ts
+  - id: openwiki-source-69abc6f0f641147820a274bc
+    resource: repo://src/agent/utils.ts
+  - id: openwiki-source-638173446de4138fa3a622a8
+    resource: repo://src/claims/guidance.ts
+  - id: openwiki-source-5c43e3fe562cf274dd6a5564
+    resource: repo://src/cli/cli.tsx
+  - id: openwiki-source-3fc16f0371ced4d94330f06c
+    resource: repo://src/cli/commands.ts
+  - id: openwiki-source-7c5ecb56558cc061dab24f9d
+    resource: repo://src/generation/repository-run.ts
+  - id: openwiki-source-080c4525024a9b689e361cbb
+    resource: repo://src/generation/run-state.ts
+  - id: openwiki-source-410e7efbe6dee8c4d43e9b4d
+    resource: repo://src/integrations/core/protocol.ts
+  - id: openwiki-source-349c953869b025f9d4935470
+    resource: repo://src/platform/language.ts
+generated: { by: "openwiki/0.5.0", at: "2026-09-09T08:09:59.193Z" }
+verified:
+  - by: openwiki/0.5.1
+    at: 2026-09-10T08:09:53.024Z
 ---
 
-# OpenWiki quickstart
+# OpenWiki Quickstart
 
-OpenWiki is a TypeScript CLI that writes and maintains documentation for a repository using an agent-driven workflow. The package exposes a single `openwiki` binary (entrypoint `./dist/cli/cli.js`), stores local credentials in `~/.openwiki/.env`, and records successful update metadata in `openwiki/.last-update.json`.
+OpenWiki is a command-line tool that writes and maintains a Markdown wiki for a
+codebase or for personal knowledge. A [Deep Agents](https://github.com/langchain-ai/deepagentsjs)
+documentation agent reads your sources, synthesizes a linked wiki you own, and
+keeps it current as those sources change. It is built for agents to read as
+memory and ships an interactive visualizer for humans to explore.
 
-## What this repository does
+This page orients a coding agent to the codebase and routes you to the page that
+matches your task. Read this first, then follow the links below.
 
-- Launches an interactive Ink-based terminal app for chatting with the OpenWiki agent.
-- Supports one-shot documentation runs with `--init`, `--update`, and `--print`.
-- Supports multiple model providers — OpenAI (default, API key or ChatGPT OAuth login), GitHub Copilot (via GitHub CLI), OpenRouter, Anthropic, Gemini (AI Studio), Gemini Enterprise (Vertex AI, keyless via Google ADC), AWS Bedrock, Nebius Token Factory, Baseten, Fireworks, NVIDIA NIM, and any OpenAI-compatible gateway — each with their own credentials and model list (Gemini Enterprise uses Google ADC instead of an API key; Bedrock uses AWS access/secret keys and region; Copilot uses the GitHub CLI for auth).
-- Uses a DeepAgents local shell backend with virtual filesystem paths rooted at the target repository.
-- Creates or refreshes documentation under the target repository's `openwiki/` directory.
-- Auto-exits after successful `--init` or `--update` runs in an interactive terminal, so the CLI works as both a one-shot and interactive tool.
-- Optionally schedules automated updates through GitHub Actions, GitLab CI, or Bitbucket Pipelines.
-- Ships two sibling evaluation harnesses: a paired DeepSWE evaluation harness (`evals/deepswe/`) that measures OpenWiki's documentation leverage on a Codex coding agent, and a LEDGER longitudinal benchmark (`evals/ledger/`) that replays a source repository's Git checkpoints, runs OpenWiki at each, and evaluates every current factual claim as supported, stale, hallucinated, or unverified.
-- Serves an interactive node-graph visualizer (`openwiki visualize`) for an already-generated wiki, with live edits refreshed over SSE.
-- Honors a repo-root `.openwikiignore` file as a read boundary that keeps private/generated paths out of doc runs.
-- Generates the wiki in a non-English language with `--language <locale>` (BCP-47); the language is persisted and retranslated on a switch via the translation middleware.
-- Stamps a `build_channel` (`official` / `community`) into each telemetry event at build time so fork-originated telemetry can be filtered from the official-release signal.
-- Validates the selected OpenAI model against the API key's model catalogue before inference, aborting early when the model is unavailable to the configured credentials.
-- Caps OpenRouter per-request output tokens with `OPENWIKI_OPENROUTER_MAX_TOKENS` to avoid 402 credit-pre-check failures on low balances.
-- Lets the openai-compatible provider opt into OpenAI's Responses API with `OPENWIKI_OPENAI_COMPATIBLE_USE_RESPONSES_API=true` (default chat completions), so a gateway exposing a Responses-compatible endpoint uses the Responses-API tool-calling/SSE path.
-- Offers a built-in `custom-mcp` connector so a personal-wiki run can ingest from any read-only MCP server without a dedicated connector, and gates all connector tools to personal/local-wiki runs so code-mode runs never make credentialed external fetches.
+## What OpenWiki is
 
-## Start here
+OpenWiki is published as the `openwiki` npm package, a Node.js (22+) CLI whose
+binary resolves to `dist/cli/cli.js`. Its purpose, per the package manifest, is
+"a CLI that uses a DeepAgents documentation agent to generate and maintain an
+OpenWiki for a codebase." The runtime is a DeepAgents documentation agent driven
+by one of several model providers, wrapped by a CLI that can run interactively
+(an Ink TUI) or one-shot (print mode).
 
-- [Architecture overview](./architecture/overview.md) — runtime structure, major modules, and execution flow.
-- [CLI usage](./cli/usage.md) — commands, options, model/provider selection, and credential bootstrap.
-- [Agent workflow](./agent/workflow.md) — how documentation runs are assembled and persisted.
-- [Credentials and updates](./operations/credentials-and-updates.md) — local env storage, metadata, and scheduled updates.
-- [Connectors](./integrations/connectors.md) — built-in connector architecture, including Custom MCP and internal-source connectors, and ingestion orchestration.
-- [DeepSWE evaluation harness](./evals/deepswe-harness.md) — paired DeepSWE benchmark harness that measures OpenWiki's documentation leverage on Codex.
-- [LEDGER longitudinal benchmark](./evals/ledger-harness.md) — source-grounded benchmark that replays Git checkpoints, runs OpenWiki at each, and scores per-claim grounding and forgetting.
+The CLI has two operating modes:
 
-## Key source files
+- **Code** _(default)_ — documents the current repository and writes the wiki to
+  `openwiki/` inside the repo.
+- **Personal** — documents your connected sources and writes to
+  `~/.openwiki/wiki`.
 
-- `README.md` — user-facing installation and usage summary.
-- `package.json` — bin entrypoint, scripts, and dependencies.
-- `src/cli/cli.tsx` — process entrypoint: parses argv, loads env, and dispatches to the interactive app, print runner, or operational subcommands.
-- `src/cli/app/app.tsx` — Ink interactive app shell: chat, run lifecycle, provider/model selection, and streaming.
-- `src/cli/commands.ts` — CLI parsing and help content.
-- `src/cli/runners.ts` — non-interactive runners for auth, ngrok, cron, ingest, visualize, and print commands.
-- `src/cli/diagnostics/` — `error-diagnostics.ts`, `sanitize.ts`, and `auth-fix.ts` for the `--debug` diagnostics panel and auth-failure fix guidance.
-- `src/agent/index.ts` — agent runtime, provider-specific model creation (including ChatGPT OAuth), OpenAI model-availability pre-check, fallback, and metadata writes.
-- `src/agent/prompt.ts` — prompt assembler: selects a template by output mode and substitutes placeholders.
-- `src/agent/prompts/code.ts` — `CODE_SYSTEM_PROMPTS`/`CODE_USER_PROMPTS` for repository runs (init/update/chat contracts, including the skeleton-critic and wiki-QA verification workflow).
-- `src/agent/prompts/personal.ts` — `PERSONAL_SYSTEM_PROMPTS`/`PERSONAL_USER_PROMPTS` for local personal-brain runs.
-- `src/agent/skeleton_critic.ts` — `skeleton_critic` init-only subagent that reviews the proposed wiki skeleton against the repository.
-- `src/agent/wiki_qa_subagents.ts` — `wiki_question_finder` and `wiki_answer_verifier` init-only subagents that verify the completed wiki answers source-grounded questions.
-- `src/agent/crash-guard.ts` — process-wide `installCrashGuard()` + `registerActiveRun`/`handleFatal` that records and stamps an escaped rejection as an interrupted run; `handleFatal` claims the active run synchronously so a burst of escaped rejections records one crash.
-- `src/agent/utils.ts` — run context, content snapshot, and `.last-update.json` handling.
-- `src/agent/types.ts` — shared agent types (`OpenWikiCommand`, `RunContext`, `UpdateMetadata`, run options/events).
-- `src/agent/docs-only-backend.ts` — `OpenWikiLocalShellBackend`, extends DeepAgents `LocalShellBackend` with docs-only write guards and output-mode awareness.
-- `src/agent/openai-chatgpt-oauth.ts` — ChatGPT OAuth flow, token persistence, and refresh logic for the `openai-chatgpt` provider.
-- `src/auth/oauth.ts` — generic OAuth runner for connector providers (Gmail, Notion, Slack, X).
-- `src/auth/oauth-discovery.ts` — OAuth endpoint validation and protected-resource metadata discovery for connector OAuth flows.
-- `src/auth/providers.ts` — connector OAuth provider configs (scopes, token URLs, env-key mappings).
-- `src/auth/configure.ts` — `openwiki auth configure <provider>` flow for creating local connector configs.
-- `src/auth/ngrok.ts` — Slack HTTPS callback tunnel via ngrok.
-- `src/auth/tokens.ts` — token refresh and validation helpers for connector OAuth.
-- `src/agent/okf-middleware.ts` — OKF front-matter migration and index synchronization middleware; its finalize stage also validates Mermaid fences and internal wiki links.
-- `src/agent/wiki-link-validator.ts` — validates internal links repo-wide (not just the `openwiki/` subtree) and GitHub-style heading anchors on Markdown targets after generation, stamping broken links inline instead of failing the run.
-- `src/agent/translation-middleware.ts` — wiki translation middleware for output-language switching.
-- `src/agent/vertex-surface.ts` — Vertex AI model routing for the gemini-enterprise provider.
-- `src/agent/skills.ts` — bundles and syncs the `/skills/` directory into the agent runtime.
-- `src/auth/external-cli-auth.ts` — GitHub CLI-based credential resolution for the copilot provider.
-- `src/platform/diagnostics.ts` — secret redaction and credential diagnostics.
-- `src/okf/` — OKF front-matter validation, index-label localization, and deterministic index synchronization.
-- `src/mermaid/` — Mermaid fence extraction, validation, and wiki repair.
-- `src/telemetry/` — anonymous usage telemetry with PostHog, opt-out, CI sentinel IDs, error classification/fingerprinting, and a baked-in `build_channel` stamp.
-- `scripts/stamp-build-channel.cjs` — release-only build-time rewrite of `BUILD_CHANNEL` in `src/telemetry/gates.ts` from `"community"` to `"official"` for npm-published upstream builds, driven by `OPENWIKI_BUILD_CHANNEL` in `.github/workflows/release.yml`.
-- `src/connectors/` — connector registry, MCP client/runtime, source-specific ingestion (custom-mcp, git-repo, gateway, internal, gmail, hackernews, langsmith, slack, web-search, x), and tool definitions.
-- `src/ingestion/ingestion.ts` — orchestrates source ingestion runs across configured connectors.
-- `src/ingestion/code-mode.ts` — `openwiki code` setup: creates the GitHub Actions workflow only when missing (preserving customizations on update), refreshes AGENTS.md, and removes legacy OpenWiki blocks from CLAUDE.md.
-- `src/config/env.ts` — `~/.openwiki/.env` persistence and credential diagnostics.
-- `src/setup/credentials.tsx` — interactive onboarding flow entrypoint (thin re-export over `src/setup/credentials/` modules: `steps.ts`, `view.tsx`, `use-init-setup.ts`, `persistence.ts`, `format.ts`, `constants.ts`, `types.ts`).
-- `src/config/constants.ts` — provider configs, model options, env keys, and validation helpers (including `resolveOpenRouterMaxTokens` and `resolveOpenAiCompatibleUseResponsesApi`).
-- `src/model-availability.ts` — `getSelectedModelAvailability()` validates the selected model against the OpenAI `/models` catalogue before inference; `unavailable` aborts, `unknown` proceeds.
-- `examples/openwiki-update.yml` — GitHub Actions scheduled automation example.
-- `examples/openwiki-update.gitlab-ci.yml` — GitLab CI scheduled automation example.
-- `examples/openwiki-update.bitbucket-pipelines.yml` — Bitbucket Pipelines scheduled automation example.
-- `evals/deepswe/run.py` — paired DeepSWE evaluation harness entrypoint (see [DeepSWE evaluation harness](./evals/deepswe-harness.md)).
-- `evals/ledger/run.ts` — LEDGER longitudinal benchmark entrypoint: loads a benchmark, replays its Git checkpoints through the OpenWiki system adapter, and evaluates each frozen wiki snapshot (see [LEDGER longitudinal benchmark](./evals/ledger-harness.md)).
-- `evals/ledger/reevaluate.ts` — re-evaluates a completed LEDGER run without re-invoking OpenWiki.
-- `evals/ledger/system/openwiki-system.ts` — `OpenWikiSystem` adapter that drives `runOpenWikiAgent` (`init`/`update`, `outputMode: "repository"`) against each replayed checkpoint.
-- `src/visualize/server.ts` — local loopback HTTP server for `openwiki visualize` (node graph + live reader, SSE reload).
-- `src/visualize/graph.ts` — parses the wiki into concept nodes and Markdown-link edges for the visualizer.
-- `src/visualize/page.ts` — branded single-page visualizer app HTML served at `/`.
-- `src/agent/openwiki-ignore.ts` — `.openwikiignore` parsing and gitignore-compatible matching (read boundary for doc runs).
-- `src/platform/language.ts` — `resolveLanguage()` BCP-47 validation/canonicalization for `--language`.
+## Developer workflow
 
-## Documentation map
+OpenWiki is a pnpm + TypeScript project. The commands you will use most:
 
-- [Architecture](./architecture/overview.md)
-- [CLI](./cli/usage.md)
-- [Agent](./agent/workflow.md)
-- [Operations](./operations/credentials-and-updates.md)
-- [Connectors](./integrations/connectors.md)
-- [DeepSWE evaluation harness](./evals/deepswe-harness.md)
-- [LEDGER longitudinal benchmark](./evals/ledger-harness.md)
+```sh
+pnpm install          # install dependencies
+pnpm run build        # tsc (server + client) then copy visualizer assets
+pnpm run dev          # run the CLI from source via tsx (src/cli/cli.tsx)
+pnpm run coverage     # run the Vitest suite with coverage
+pnpm test             # typecheck + build + coverage (the full CI-equivalent gate)
+```
 
-## Notes for future agents
+`pnpm run dev` executes the TypeScript entrypoint directly with `tsx`, while the
+shipped binary runs the compiled `dist/cli/cli.js`. Before opening a PR, run
+`pnpm run format`, `pnpm run lint`, and `pnpm test`; `format` and `lint` mirror
+the per-PR checks and `test` typechecks, builds, and runs Vitest with coverage.
 
-- The repository is intentionally focused: the main product surface is the CLI plus the documentation-generation agent.
-- Treat `openwiki/` in this repo as generated documentation output from a future OpenWiki run, not as application source.
-- When changing behavior, verify both the CLI parser and the agent prompt/runtime, because user-visible semantics are split across `src/cli/commands.ts`, `src/cli/cli.tsx`, and `src/agent/*`.
-- Provider support is centralized in `src/config/constants.ts`. Adding or changing a provider means updating `PROVIDER_CONFIGS`, the `OpenWikiProvider` type, the `SELECTABLE_OPENWIKI_PROVIDERS` list, and the model-creation branch in `src/agent/index.ts`. OAuth-based providers also need an entry in `src/auth/` if they use browser-login flows. Providers without an API key (like `gemini-enterprise`) declare their required env keys (e.g. `projectEnvKey`) in `PROVIDER_CONFIGS` and are gated by `getMissingProviderEnvKey()` instead. External-CLI-auth providers (like `copilot`) declare `authMethod: "external-cli"` and an `externalCliAuthAdapter`, with the login flow handled in `src/auth/external-cli-auth.ts`. AWS SDK providers (like `bedrock`) declare `authMethod: "aws-sdk"` and delegate credential resolution to the AWS SDK chain.
+To exercise the CLI against another local repository, link the package globally
+(`pnpm link --global`) or alias `openwiki` to `node /path/to/openwiki/dist/cli/cli.js`,
+then run it from the target repo's working directory.
 
-## Source map
+## Entrypoint and control flow
 
-- `README.md`
-- `package.json`
-- `src/cli/cli.tsx`
-- `src/cli/app/app.tsx`
-- `src/cli/commands.ts`
-- `src/cli/runners.ts`
-- `src/cli/diagnostics/` (`error-diagnostics.ts`, `sanitize.ts`, `auth-fix.ts`)
-- `src/agent/index.ts`
-- `src/model-availability.ts`
-- `src/agent/prompt.ts`
-- `src/agent/prompts/code.ts`
-- `src/agent/prompts/personal.ts`
-- `src/agent/skeleton_critic.ts`
-- `src/agent/wiki_qa_subagents.ts`
-- `src/agent/crash-guard.ts`
-- `src/agent/utils.ts`
-- `src/agent/types.ts`
-- `src/agent/docs-only-backend.ts`
-- `src/agent/openai-chatgpt-oauth.ts`
-- `src/agent/openwiki-ignore.ts`
-- `src/auth/oauth.ts`
-- `src/auth/oauth-discovery.ts`
-- `src/auth/providers.ts`
-- `src/auth/configure.ts`
-- `src/auth/ngrok.ts`
-- `src/auth/tokens.ts`
-- `src/auth/types.ts`
-- `src/auth/external-cli-auth.ts`
-- `src/connectors/registry.ts`
-- `src/connectors/tools.ts`
-- `src/connectors/types.ts`
-- `src/connectors/http.ts`
-- `src/connectors/mcp-client.ts`
-- `src/connectors/mcp-runtime.ts`
-- `src/connectors/io.ts`
-- `src/connectors/sources/git-repo.ts`
-- `src/connectors/sources/gmail.ts`
-- `src/connectors/sources/hackernews.ts`
-- `src/connectors/sources/langsmith/` (api.ts, index.ts, repo-config.ts, runs.ts, setup.ts, types.ts)
-- `src/connectors/sources/mcp.ts`
-- `src/connectors/sources/slack.ts`
-- `src/connectors/sources/web-search.ts`
-- `src/connectors/sources/x.ts`
-- `src/ingestion/ingestion.ts`
-- `src/ingestion/code-mode.ts`
-- `src/config/env.ts`
-- `src/setup/credentials.tsx` (re-exports `src/setup/credentials/`)
-- `src/setup/onboarding.ts`
-- `src/config/constants.ts`
-- `src/auth/external-cli-auth.ts`
-- `src/platform/diagnostics.ts`
-- `src/platform/utils.ts`
-- `src/platform/language.ts`
-- `src/okf/` (frontmatter.ts, index-labels.ts, index-sync.ts)
-- `src/mermaid/` (dom-shim.ts, fences.ts, validate.ts, wiki.ts)
-- `src/telemetry/`
-- `scripts/stamp-build-channel.cjs`
-- `examples/openwiki-update.yml`
-- `examples/openwiki-update.gitlab-ci.yml`
-- `examples/openwiki-update.bitbucket-pipelines.yml`
-- `src/visualize/` (server.ts, graph.ts, page.ts, client.ts, client-lib.ts)
-- `src/agent/openwiki-ignore.ts`
-- `src/scheduling/schedules.ts`
+The process entrypoint is `src/cli/cli.tsx`. It installs a crash guard before any
+run so escaped rejections are recorded with telemetry, parses the argument vector
+into a command, and dispatches:
+
+- `integrations` and `mcp` commands go to the host-integration surface
+  (`runIntegrationsCommand` / `runMcpCommand`).
+- All other commands run through `runStandardCommand`, the native pipeline, which
+  loads environment, resolves the startup command, decides once whether this is
+  the first run (mints the install id), and then either prints a startup error,
+  runs non-interactively in print mode, or renders the interactive Ink `App`.
+
+The `dev` script points at this same `.tsx` file, so behavior is identical
+between `pnpm run dev` and the built binary.
+
+> **Behavioral change operators hit first:** an unrecognized `--language` value
+> (for example a misspelled locale or a bare language name) is now rejected at
+> parse time as a parse error rather than silently generating an English wiki.
+> `parseCommand` classifies the flag via `resolveLanguage` and, on an
+> `unrecognized` result, returns an `error` command with the user-facing
+> message before any run work or persisted state is touched. The full command
+> and flag reference lives in
+> [CLI Reference](/openwiki/operations/cli-reference.md).
+
+## Task-routing map
+
+Find your task on the left, then read the page on the right. This routes you to
+the canonical wiki pages; each one links into the deeper source map.
+
+### Understand the system
+
+| I want to…                                                                                                          | Read                                                        |
+| ------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| Get the top-level picture of how the CLI, agent, modes, resumable generation, Claims, finalization, connectors, and the visualizer fit together | [Architecture Overview](/openwiki/architecture/overview.md) |
+| Find which subsystem lives where under `/src`                                                                       | [Source Map](/openwiki/architecture/source-map.md)          |
+
+### Learn the core concepts
+
+| I want to…                                                                        | Read                                                                 |
+| --------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| Understand grounded Claims: material facts tied to versioned repository evidence   | [Grounded Claims](/openwiki/concepts/grounded-claims.md)             |
+| See what OKF output looks like (frontmatter, provenance, validated Mermaid)        | [Open Knowledge Format Output](/openwiki/concepts/okf-output.md)     |
+
+### Follow a workflow end to end
+
+| I want to…                                                                                                              | Read                                                                  |
+| ----------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| Set up OpenWiki for the first time (provider/model, credentials, repo setup)                                            | [First-Run Onboarding](/openwiki/workflows/onboarding.md)             |
+| Trace the resumable page-job generation flow (`begin → submit_plan → next_page → submit_page → finish`, with on-demand `inspect_page_claims`)                  | [Repository Generation Lifecycle](/openwiki/workflows/repository-generation.md) |
+| Understand how a failing or early-exiting page worker is skipped and restored without losing completed pages            | [Repository Generation Lifecycle](/openwiki/workflows/repository-generation.md) |
+| Understand how repository source drift during a run is detected and why the run finalizes without advancing the source checkpoint | [Repository Generation Lifecycle](/openwiki/workflows/repository-generation.md) |
+| Understand how Claims are reconciled on update and how a page submits sparse Claim decisions (`confirmedClaimIds` / `claims` / `retractedClaimIds`) with issue-free Claims retained automatically and full Claims available via on-demand inspect | [Claims Reconciliation](/openwiki/workflows/claims-reconciliation.md) |
+| Understand deterministic finalize-once finalization, index/provenance sync, link validation, and skipped-page restore on finish | [Wiki Finalization Workflow](/openwiki/workflows/wiki-finalization.md) |
+
+### Operate and configure it
+
+| I want to…                                                                                   | Read                                                         |
+| -------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| Look up CLI commands and flags (init/update, mode, print, integrations, visualize, schedule) | [CLI Reference](/openwiki/operations/cli-reference.md)        |
+| Understand environment loading, the `~/.openwiki` state directory, provider/token/reasoning settings, and secret sanitization | [Configuration and Environment](/openwiki/operations/configuration.md) |
+| Set up scheduled self-update in CI and the docs-PR workflow                                  | [CI Scheduling and Self-Update](/openwiki/operations/ci-scheduling.md) |
+
+### Integrate with other tools
+
+| I want to…                                                                  | Read                                             |
+| --------------------------------------------------------------------------- | ------------------------------------------------ |
+| Run OpenWiki inside Codex, Claude Code, OpenCode, or Cursor                 | [Coding-Agent Integrations](/openwiki/integrations/coding-agents.md) |
+| Understand the built-in source connectors, the ConnectorRuntime contract, and how to add a new one | [Source Connectors](/openwiki/integrations/connectors.md) |
+| Explore the interactive graph visualizer (live server and static export)    | [Interactive Visualizer](/openwiki/integrations/visualizer.md) |
+
+### Test your changes
+
+| I want to…                                                | Read                                           |
+| --------------------------------------------------------- | ---------------------------------------------- |
+| Understand the test layout and how to run and scope tests | [Testing Guide](/openwiki/testing/overview.md) |
+
+## Where OpenWiki keeps its state
+
+- **Repository (code) wiki:** written to `openwiki/` in the repo, alongside the
+  structured Claims sidecar under `openwiki/.claims/` and in-progress run state
+  in `openwiki/.run.json`.
+- **Local state:** credentials, the personal wiki, connector data, conversation
+  history, and skills live under `~/.openwiki` by default; set
+  `OPENWIKI_CONFIG_DIR` to relocate to a different writable directory.
+
+Repository (code) generation follows the resumable page-job flow
+`begin → submit_plan → next_page → submit_page → … → finish`, with the
+non-mutating `inspect_page_claims` available on demand inside `generating` for a
+worker that needs the complete current Claim set before intentionally revising
+or removing otherwise-current content. Each page job has
+a `PageJobStatus` of `pending`, `skipped`, or `complete`. A worker that fails or
+exits without submitting its page is marked `skipped` and rolled back to its
+pre-worker state so completed pages are not lost; the run can still `finish` once
+every remaining job is `complete` or `skipped`, and a resumed run resets skipped
+jobs back to `pending` so they are re-attempted. In-progress runs are recorded in
+`openwiki/.run.json`; on a persistent checkout, an interrupted run resumes the
+durable page queue, while ephemeral CI runners start fresh after failure unless
+their workspace is preserved. An update whose Claims preflight is clean, source
+fingerprint is unchanged, and every existing page has complete baseline coverage
+is proven a strict no-op at `begin` time and skips model invocation.
+
+Finalization is deterministic and runs once. `finishRepositoryRun` refuses to
+finish while any page job is still `pending`, validates that every `skipped` job
+carries its original page snapshot, restores skipped pages to their pre-worker
+Markdown and Claims, persists and proves the reconciled Claims durable, and only
+then removes `openwiki/.run.json` — so any earlier failure leaves the run
+resumable. If repository source changed while OpenWiki was running (detected by
+re-fingerprinting the source before and after finalization), the run finalizes
+without advancing the source checkpoint and writes `interrupted` update metadata
+instead of `complete`, prompting a follow-up `openwiki --update` to reconcile the
+drift.
+
+## Host-driven generation
+
+OpenWiki can also run inside a host coding agent (Codex, Claude Code, OpenCode,
+or Cursor) instead of launching its own model. The integration shares one
+canonical skill and the same six MCP operations as native generation:
+`openwiki_begin`, `openwiki_submit_plan`, `openwiki_next_page`, optional on-demand
+`openwiki_inspect_page_claims`, `openwiki_submit_page`, and `openwiki_finish`. The
+host owns repository research, planning, and factual authoring; OpenWiki owns the
+durable queue, Claims reconciliation, source-drift handling, and deterministic
+finalization. Host-driven runs currently support repository code wikis (not
+personal brains), use the host's authenticated model session, and use repository
+source and tests only — connector context (including LangSmith) is not yet
+supported. The host submits only sparse Claim decisions for each page
+(`confirmedClaimIds` for rechecked issue Claims kept unchanged, `claims` for
+revisions and additions, `retractedClaimIds` for removals); OpenWiki
+automatically retains current issue-free Claims and makes the full Claim set
+available through on-demand `openwiki_inspect_page_claims` for broad rewrites.
+See [Coding-Agent Integrations](/openwiki/integrations/coding-agents.md) for
+install scope, the host registry, and the host-driven lifecycle boundary.

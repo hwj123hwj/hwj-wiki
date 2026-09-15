@@ -94,6 +94,7 @@ describe("createRequestHandler", () => {
       getGraph: () => graph,
       clientJs: "/* client */",
       clientLibJs: "/* client-lib */",
+      stylesCss: "/* styles */",
       sseClients,
     });
   });
@@ -118,9 +119,9 @@ describe("createRequestHandler", () => {
         [
           "default-src 'none'",
           "script-src 'self' https://cdn.jsdelivr.net",
-          "style-src 'self' 'unsafe-inline'",
+          "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
           "img-src 'self' data:",
-          "font-src 'self'",
+          "font-src 'self' https://fonts.gstatic.com",
           "connect-src 'self'",
           "base-uri 'none'",
           "form-action 'none'",
@@ -150,6 +151,17 @@ describe("createRequestHandler", () => {
     expect(out.statusCode).toBe(200);
     expect(out.headers["content-type"]).toBe("text/javascript; charset=utf-8");
     expect(out.body).toBe("/* client-lib */");
+  });
+
+  test("/styles.css serves the injected stylesheet", () => {
+    const { req } = makeRequest("/styles.css");
+    const out = makeResponse();
+
+    handler(req, out.res);
+
+    expect(out.statusCode).toBe(200);
+    expect(out.headers["content-type"]).toBe("text/css; charset=utf-8");
+    expect(out.body).toBe("/* styles */");
   });
 
   test("/api/graph serves the live graph as JSON", () => {
@@ -211,6 +223,7 @@ describe("createRequestHandler", () => {
     "/%2e%2e/%2e%2e/etc/passwd",
     "/client.js/../../../secret",
     "/api/graph/../../etc/passwd",
+    "/styles.css/../../../secret",
   ])("path-traversal attempt %s is a 404", (url) => {
     const { req } = makeRequest(url);
     const out = makeResponse();

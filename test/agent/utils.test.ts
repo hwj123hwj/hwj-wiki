@@ -7,13 +7,11 @@ import { describe, expect, test } from "vitest";
 import {
   createOpenWikiContentSnapshot,
   getUpdateNoopStatus,
-  removeTemporaryPlanFile,
 } from "../../src/agent/utils.ts";
 
 // These cover the branches of utils.ts that the sibling run-context,
 // run-metadata, and update-noop suites do not reach: the degenerate no-op
-// paths, the snapshot recursion, and the unexpected-error path of plan-file
-// removal. (createRunContext's own behavior is covered by run-context.test.ts;
+// paths and snapshot recursion. (createRunContext's own behavior is covered by run-context.test.ts;
 // it no longer computes a git summary in code — the agent runs git itself.)
 
 const execFileAsync = promisify(execFile);
@@ -90,25 +88,6 @@ describe("getUpdateNoopStatus degenerate cases", () => {
   });
 });
 
-describe("removeTemporaryPlanFile error handling", () => {
-  test("propagates unexpected errors instead of swallowing them", async () => {
-    const cwd = await mkdtemp(path.join(tmpdir(), "openwiki-utils-plan-"));
-
-    try {
-      // A directory where the plan file is expected makes rm fail with a
-      // non-ENOENT error. That is not the tolerated "already gone" case, so it
-      // must surface rather than be reported as a benign "nothing removed".
-      await mkdir(path.join(cwd, "openwiki", "_plan.md"), { recursive: true });
-
-      await expect(
-        removeTemporaryPlanFile(cwd, "repository"),
-      ).rejects.toThrow();
-    } finally {
-      await rm(cwd, { recursive: true, force: true });
-    }
-  });
-});
-
 describe("createOpenWikiContentSnapshot recursion", () => {
   test("hashes nested files and changes when nested content changes", async () => {
     const cwd = await mkdtemp(path.join(tmpdir(), "openwiki-utils-snap-"));
@@ -131,6 +110,41 @@ describe("createOpenWikiContentSnapshot recursion", () => {
       // A change buried in a subdirectory must still alter the hash, proving the
       // walk recurses rather than only hashing the top level.
       expect(after).not.toBe(before);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test("includes claim sidecars while excluding run metadata", async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), "openwiki-utils-claims-"));
+
+    try {
+      const claimsDir = path.join(cwd, "openwiki", ".claims");
+      await mkdir(claimsDir, { recursive: true });
+      await writeFile(path.join(cwd, "openwiki", "page.md"), "# Page\n");
+      await writeFile(path.join(claimsDir, "page.json"), '{"revision":1}\n');
+      const before = await createOpenWikiContentSnapshot(cwd, "repository");
+
+      await writeFile(
+        path.join(cwd, "openwiki", ".last-update.json"),
+        '{"status":"complete"}\n',
+      );
+      expect(await createOpenWikiContentSnapshot(cwd, "repository")).toBe(
+        before,
+      );
+
+      await writeFile(
+        path.join(cwd, "openwiki", ".run.json"),
+        '{"phase":"generating"}\n',
+      );
+      expect(await createOpenWikiContentSnapshot(cwd, "repository")).toBe(
+        before,
+      );
+
+      await writeFile(path.join(claimsDir, "page.json"), '{"revision":2}\n');
+      expect(await createOpenWikiContentSnapshot(cwd, "repository")).not.toBe(
+        before,
+      );
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }

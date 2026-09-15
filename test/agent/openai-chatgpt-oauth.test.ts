@@ -76,7 +76,7 @@ describe("Codex Responses requests", () => {
         input: [{ role: "system", content: "Follow the repository rules." }],
         instructions: "You are a coding agent.",
         parallel_tool_calls: true,
-        reasoning: { effort: "high" },
+        reasoning: { effort: "max" },
         tools: [
           {
             type: "function",
@@ -121,7 +121,7 @@ describe("Codex Responses requests", () => {
         { role: "developer", content: "Follow the repository rules." },
       ],
       parallel_tool_calls: false,
-      reasoning: { effort: "high", context: "all_turns" },
+      reasoning: { effort: "max", context: "all_turns" },
     });
   });
 
@@ -157,6 +157,47 @@ describe("Codex Responses requests", () => {
       });
     },
   );
+
+  test.each(["gpt-5.6", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.6-sol"])(
+    "omits unsupported prompt cache retention for %s",
+    async (modelId) => {
+      const fetchMock = vi.fn(() => Promise.resolve(new Response()));
+      const codexFetch = createCodexFetch(modelId, fetchMock);
+
+      await codexFetch("https://chatgpt.com/backend-api/codex/responses", {
+        body: JSON.stringify({
+          input: [],
+          prompt_cache_retention: "24h",
+          store: false,
+        }),
+        method: "POST",
+      });
+
+      const [, init] = fetchMock.mock.calls[0] as [string, { body: string }];
+      const payload = JSON.parse(init.body) as Record<string, unknown>;
+
+      expect(payload).not.toHaveProperty("prompt_cache_retention");
+      expect(payload.store).toBe(false);
+    },
+  );
+
+  test.each([
+    ["gpt-5.5", "https://chatgpt.com/backend-api/codex/responses"],
+    ["gpt-5.6-sol", "https://example.com/responses"],
+  ])("preserves prompt cache retention for %s at %s", async (modelId, url) => {
+    const fetchMock = vi.fn(() => Promise.resolve(new Response()));
+    const codexFetch = createCodexFetch(modelId, fetchMock);
+
+    await codexFetch(url, {
+      body: JSON.stringify({ input: [], prompt_cache_retention: "24h" }),
+      method: "POST",
+    });
+
+    const [, init] = fetchMock.mock.calls[0] as [string, { body: string }];
+    expect(JSON.parse(init.body)).toMatchObject({
+      prompt_cache_retention: "24h",
+    });
+  });
 
   test("does not apply Luna identity outside the Codex Responses endpoint", async () => {
     const fetchMock = vi.fn(() => Promise.resolve(new Response()));

@@ -32,12 +32,14 @@ import {
   withRunTelemetry,
   type RunTelemetryContext,
 } from "../telemetry/index.js";
+import { exportStaticVisualizer } from "../visualize/static-export.js";
 import { runVisualizeServer } from "../visualize/server.js";
 import type { CliCommand } from "./commands.js";
 import { isDebugMode } from "./debug.js";
 import { getAuthFix, getAuthFixSteps } from "./diagnostics/auth-fix.js";
 import { getErrorDiagnostics } from "./diagnostics/error-diagnostics.js";
 import { getRunModeCwd, getRunModeOutputMode } from "./run-mode.js";
+import { formatRepositoryPrintProgress } from "./run-log/progress.js";
 import {
   formatPowerScheduleStatus,
   formatScheduleHeader,
@@ -61,14 +63,24 @@ export async function runNgrokCommand(
 }
 
 /**
- * Start the wiki visualizer server for a resolved wiki directory. Blocks until the
- * server is stopped with Ctrl-C; surfaces a missing-directory error cleanly.
+ * Start the wiki visualizer server or export its static files for web hosting.
  */
 export async function runVisualizeCommand(
   command: Extract<CliCommand, { kind: "visualize" }>,
 ): Promise<void> {
   const wikiRoot = path.resolve(process.cwd(), command.wikiDir);
   try {
+    if (command.exportDir) {
+      const result = await exportStaticVisualizer({
+        wikiRoot,
+        outputDir: path.resolve(process.cwd(), command.exportDir),
+      });
+      process.stdout.write(
+        `Exported static visualizer to ${result.outputDir} (${result.graph.nodes.length} pages, ${result.graph.edges.length} links).\n`,
+      );
+      return;
+    }
+
     await runVisualizeServer({
       wikiRoot,
       port: command.port,
@@ -148,7 +160,7 @@ export async function runIngestCommand(
       scheduledOnly: command.scheduledOnly,
       target: command.target,
       onEvent: (event) => {
-        if (event.type === "text" && event.source !== "subgraph") {
+        if (event.type === "text") {
           process.stdout.write(event.text);
         }
       },
@@ -297,8 +309,10 @@ export async function runPrintCommand(
     const runtimeOutputMode = getRunModeOutputMode(command.mode);
 
     const handlePrintEvent = (event: OpenWikiRunEvent): void => {
-      if (event.type === "text" && event.source !== "subgraph") {
+      if (event.type === "text") {
         output.push(event.text);
+      } else if (event.type === "repository_progress") {
+        output.push(formatRepositoryPrintProgress(event, command.command));
       }
     };
 

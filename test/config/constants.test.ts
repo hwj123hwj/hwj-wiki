@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 import {
   BASETEN_BASE_URL_ENV_KEY,
+  BEDROCK_DEFAULT_MAX_TOKENS,
   DEFAULT_MODEL_ID,
   DEFAULT_PROVIDER_RETRY_ATTEMPTS,
   DEFAULT_PROVIDER,
@@ -28,7 +29,13 @@ import {
   providerRequiresRegion,
   providerRequiresSecretKey,
   providerUsesAwsSdkCredentials,
+  resolveBedrockMaxTokens,
+  resolveConfiguredMaxOutputTokens,
+  providerUsesStreaming,
   resolveConfiguredProvider,
+  resolveMaxOutputTokens,
+  resolveOpenAiCompatibleReasoningEffortSupported,
+  resolveOpenAiCompatibleStreaming,
   resolveOpenAiCompatibleUseResponsesApi,
   resolveOpenRouterMaxTokens,
   resolveOpenRouterProviderOnly,
@@ -36,7 +43,13 @@ import {
   resolveProviderLocation,
   resolveProviderRegion,
   resolveProviderRetryAttempts,
+  resolveStreamIdleTimeout,
+  resolveStreamIdleTimeoutForProvider,
 } from "../../src/config/constants.ts";
+import {
+  getReasoningCapability,
+  resolveReasoningConfig,
+} from "../../src/config/reasoning.ts";
 
 describe("isValidModelId", () => {
   test("accepts normal provider/model ids", () => {
@@ -286,6 +299,226 @@ describe("resolveProviderRetryAttempts", () => {
   });
 });
 
+describe("resolveMaxOutputTokens", () => {
+  test("uses no explicit limit when no override is set", () => {
+    expect(resolveMaxOutputTokens({})).toBeUndefined();
+  });
+
+  test("accepts positive integer output token limits", () => {
+    expect(
+      resolveMaxOutputTokens({
+        OPENWIKI_MAX_OUTPUT_TOKENS: "1",
+      }),
+    ).toBe(1);
+    expect(
+      resolveMaxOutputTokens({
+        OPENWIKI_MAX_OUTPUT_TOKENS: " 8192 ",
+      }),
+    ).toBe(8192);
+  });
+
+  test("rejects invalid output token limits", () => {
+    for (const value of [
+      "",
+      "   ",
+      "0",
+      "-1",
+      "1.5",
+      "abc",
+      "1e2",
+      "9007199254740992",
+    ]) {
+      expect(() =>
+        resolveMaxOutputTokens({
+          OPENWIKI_MAX_OUTPUT_TOKENS: value,
+        }),
+      ).toThrow(/OPENWIKI_MAX_OUTPUT_TOKENS/u);
+    }
+  });
+});
+
+describe("resolveStreamIdleTimeout", () => {
+  test("uses the provider default when no override is set", () => {
+    expect(resolveStreamIdleTimeout({})).toBeUndefined();
+  });
+
+  test("accepts zero to disable the watchdog and positive millisecond values", () => {
+    expect(
+      resolveStreamIdleTimeout({
+        OPENWIKI_STREAM_IDLE_TIMEOUT: " 0 ",
+      }),
+    ).toBe(0);
+    expect(
+      resolveStreamIdleTimeout({
+        OPENWIKI_STREAM_IDLE_TIMEOUT: "300000",
+      }),
+    ).toBe(300000);
+    expect(
+      resolveStreamIdleTimeout({
+        OPENWIKI_STREAM_IDLE_TIMEOUT: "2147483647",
+      }),
+    ).toBe(2147483647);
+  });
+
+  test("rejects invalid stream idle timeouts", () => {
+    for (const value of [
+      "",
+      "   ",
+      "-1",
+      "1.5",
+      "abc",
+      "1e2",
+      "2147483648",
+      "9007199254740992",
+    ]) {
+      expect(() =>
+        resolveStreamIdleTimeout({
+          OPENWIKI_STREAM_IDLE_TIMEOUT: value,
+        }),
+      ).toThrow(/OPENWIKI_STREAM_IDLE_TIMEOUT/u);
+    }
+  });
+});
+
+describe("resolveStreamIdleTimeoutForProvider", () => {
+  test("ignores a stale Bedrock timeout for other providers", () => {
+    expect(
+      resolveStreamIdleTimeoutForProvider("openai", {
+        OPENWIKI_STREAM_IDLE_TIMEOUT: "invalid",
+      }),
+    ).toBeUndefined();
+  });
+
+  test("validates the timeout when Bedrock is active", () => {
+    expect(
+      resolveStreamIdleTimeoutForProvider("bedrock", {
+        OPENWIKI_STREAM_IDLE_TIMEOUT: "300000",
+      }),
+    ).toBe(300000);
+    expect(() =>
+      resolveStreamIdleTimeoutForProvider("bedrock", {
+        OPENWIKI_STREAM_IDLE_TIMEOUT: "invalid",
+      }),
+    ).toThrow(/OPENWIKI_STREAM_IDLE_TIMEOUT/u);
+  });
+});
+
+describe("reasoning capabilities", () => {
+  const GEMINI_REASONING_MODEL = "gemini-3.6-flash";
+  const GEMINI_REASONING_VALUES = ["low", "medium", "high"] as const;
+
+  test("returns the configured capability for the initial OpenAI, Gemini, and NVIDIA models", () => {
+    expect(getReasoningCapability("openai", "gpt-5.6-luna")).toEqual({
+      transport: "responses-reasoning",
+      values: ["none", "low", "medium", "high", "xhigh", "max"],
+    });
+    expect(getReasoningCapability("gemini", GEMINI_REASONING_MODEL)).toEqual({
+      transport: "gemini-thinking-level",
+      values: GEMINI_REASONING_VALUES,
+    });
+    expect(
+      getReasoningCapability("nvidia", "nvidia/nemotron-3-super-120b-a12b"),
+    ).toEqual({
+      transport: "chat-completions-reasoning-effort",
+      values: ["none", "low", "high"],
+    });
+  });
+
+  test("leaves reasoning unset when the environment variable is absent", () => {
+    expect(
+      resolveReasoningConfig("openai", "gpt-5.6-luna", {}),
+    ).toBeUndefined();
+  });
+
+  test("keeps OpenAI-compatible reasoning unsupported unless explicitly opted in", () => {
+    expect(
+      getReasoningCapability("openai-compatible", "Qwen/Qwen3.7-235B", {}),
+    ).toBeUndefined();
+    expect(() =>
+      resolveReasoningConfig("openai-compatible", "Qwen/Qwen3.7-235B", {
+        OPENWIKI_REASONING_EFFORT: "high",
+      }),
+    ).toThrow(/not supported/u);
+  });
+
+  test("resolves supported values for OpenAI, Gemini, and NVIDIA NIM", () => {
+    expect(
+      resolveReasoningConfig("openai-chatgpt", "gpt-5.6-luna", {
+        OPENWIKI_REASONING_EFFORT: " max ",
+      }),
+    ).toEqual({ effort: "max", transport: "responses-reasoning" });
+    expect(
+      resolveReasoningConfig("gemini", GEMINI_REASONING_MODEL, {
+        OPENWIKI_REASONING_EFFORT: "medium",
+      }),
+    ).toEqual({
+      effort: "medium",
+      transport: "gemini-thinking-level",
+    });
+    expect(
+      resolveReasoningConfig("nvidia", "nvidia/nemotron-3-super-120b-a12b", {
+        OPENWIKI_REASONING_EFFORT: "high",
+      }),
+    ).toEqual({
+      effort: "high",
+      transport: "chat-completions-reasoning-effort",
+    });
+  });
+
+  test("resolves OpenAI-compatible reasoning to chat completions when opted in", () => {
+    expect(
+      getReasoningCapability("openai-compatible", "Qwen/Qwen3.7-235B", {
+        OPENWIKI_OPENAI_COMPATIBLE_REASONING_EFFORT_SUPPORTED: "true",
+      }),
+    ).toEqual({
+      transport: "chat-completions-reasoning-effort",
+      values: ["none", "low", "medium", "high", "xhigh", "max"],
+    });
+    expect(
+      resolveReasoningConfig("openai-compatible", "Qwen/Qwen3.7-235B", {
+        OPENWIKI_OPENAI_COMPATIBLE_REASONING_EFFORT_SUPPORTED: "true",
+        OPENWIKI_REASONING_EFFORT: " high ",
+      }),
+    ).toEqual({
+      effort: "high",
+      transport: "chat-completions-reasoning-effort",
+    });
+  });
+
+  test("resolves OpenAI-compatible reasoning to Responses when both opt-ins are set", () => {
+    expect(
+      resolveReasoningConfig("openai-compatible", "Qwen/Qwen3.7-235B", {
+        OPENWIKI_OPENAI_COMPATIBLE_REASONING_EFFORT_SUPPORTED: "true",
+        OPENWIKI_OPENAI_COMPATIBLE_USE_RESPONSES_API: "true",
+        OPENWIKI_REASONING_EFFORT: "max",
+      }),
+    ).toEqual({ effort: "max", transport: "responses-reasoning" });
+  });
+
+  test("rejects invalid or unsupported reasoning effort settings before a request", () => {
+    expect(() =>
+      resolveReasoningConfig("openai", "gpt-5.6-luna", {
+        OPENWIKI_REASONING_EFFORT: "fast",
+      }),
+    ).toThrow(/Invalid OPENWIKI_REASONING_EFFORT/u);
+    expect(() =>
+      resolveReasoningConfig("nvidia", "nvidia/nemotron-3-super-120b-a12b", {
+        OPENWIKI_REASONING_EFFORT: "max",
+      }),
+    ).toThrow(/Supported values: none, low, high/u);
+    expect(() =>
+      resolveReasoningConfig("gemini", GEMINI_REASONING_MODEL, {
+        OPENWIKI_REASONING_EFFORT: "max",
+      }),
+    ).toThrow(/Supported values: low, medium, high/u);
+    expect(() =>
+      resolveReasoningConfig("nvidia", "openai/gpt-oss-120b", {
+        OPENWIKI_REASONING_EFFORT: "high",
+      }),
+    ).toThrow(/not supported/u);
+  });
+});
+
 describe("resolveOpenRouterProviderOnly", () => {
   test("returns undefined when no provider pin is configured", () => {
     expect(resolveOpenRouterProviderOnly({})).toBeUndefined();
@@ -337,6 +570,98 @@ describe("resolveOpenAiCompatibleUseResponsesApi", () => {
   });
 });
 
+describe("resolveOpenAiCompatibleReasoningEffortSupported", () => {
+  test("requires an explicit true opt-in", () => {
+    expect(resolveOpenAiCompatibleReasoningEffortSupported({})).toBe(false);
+    expect(
+      resolveOpenAiCompatibleReasoningEffortSupported({
+        OPENWIKI_OPENAI_COMPATIBLE_REASONING_EFFORT_SUPPORTED: "true",
+      }),
+    ).toBe(true);
+    expect(
+      resolveOpenAiCompatibleReasoningEffortSupported({
+        OPENWIKI_OPENAI_COMPATIBLE_REASONING_EFFORT_SUPPORTED: " TRUE ",
+      }),
+    ).toBe(true);
+    expect(
+      resolveOpenAiCompatibleReasoningEffortSupported({
+        OPENWIKI_OPENAI_COMPATIBLE_REASONING_EFFORT_SUPPORTED: "false",
+      }),
+    ).toBe(false);
+    expect(
+      resolveOpenAiCompatibleReasoningEffortSupported({
+        OPENWIKI_OPENAI_COMPATIBLE_REASONING_EFFORT_SUPPORTED: "yes",
+      }),
+    ).toBe(false);
+  });
+});
+
+describe("resolveOpenAiCompatibleStreaming", () => {
+  test("leaves the transport at the client default", () => {
+    expect(resolveOpenAiCompatibleStreaming({})).toBe(false);
+  });
+
+  test("only forces streaming for an explicit true opt-in", () => {
+    expect(
+      resolveOpenAiCompatibleStreaming({
+        OPENWIKI_OPENAI_COMPATIBLE_STREAMING: "true",
+      }),
+    ).toBe(true);
+    expect(
+      resolveOpenAiCompatibleStreaming({
+        OPENWIKI_OPENAI_COMPATIBLE_STREAMING: " TRUE ",
+      }),
+    ).toBe(true);
+    expect(
+      resolveOpenAiCompatibleStreaming({
+        OPENWIKI_OPENAI_COMPATIBLE_STREAMING: "false",
+      }),
+    ).toBe(false);
+  });
+});
+
+describe("providerUsesStreaming", () => {
+  test("stays off for openai-compatible without the opt-in", () => {
+    delete process.env.OPENWIKI_OPENAI_COMPATIBLE_STREAMING;
+
+    expect(providerUsesStreaming("openai-compatible")).toBe(false);
+  });
+
+  test("forces streaming for openai-compatible when opted in", () => {
+    process.env.OPENWIKI_OPENAI_COMPATIBLE_STREAMING = "true";
+
+    try {
+      expect(providerUsesStreaming("openai-compatible")).toBe(true);
+    } finally {
+      delete process.env.OPENWIKI_OPENAI_COMPATIBLE_STREAMING;
+    }
+  });
+
+  test("always forces streaming for copilot regardless of the opt-in", () => {
+    delete process.env.OPENWIKI_OPENAI_COMPATIBLE_STREAMING;
+
+    expect(providerUsesStreaming("copilot")).toBe(true);
+  });
+
+  test("never applies to the other providers sharing the ChatOpenAI branch", () => {
+    process.env.OPENWIKI_OPENAI_COMPATIBLE_STREAMING = "true";
+
+    try {
+      for (const provider of [
+        "openai",
+        "baseten",
+        "fireworks",
+        "nebius",
+        "nvidia",
+      ] as const) {
+        expect(providerUsesStreaming(provider)).toBe(false);
+      }
+    } finally {
+      delete process.env.OPENWIKI_OPENAI_COMPATIBLE_STREAMING;
+    }
+  });
+});
+
 describe("resolveOpenRouterMaxTokens", () => {
   test("returns undefined when no cap is configured", () => {
     expect(resolveOpenRouterMaxTokens({})).toBeUndefined();
@@ -356,6 +681,87 @@ describe("resolveOpenRouterMaxTokens", () => {
       expect(() =>
         resolveOpenRouterMaxTokens({ OPENWIKI_OPENROUTER_MAX_TOKENS: value }),
       ).toThrow(/OPENWIKI_OPENROUTER_MAX_TOKENS/u);
+    }
+  });
+});
+
+describe("resolveBedrockMaxTokens", () => {
+  test("returns the default ceiling (16000) when env var is unset", () => {
+    expect(resolveBedrockMaxTokens({})).toBe(BEDROCK_DEFAULT_MAX_TOKENS);
+    expect(resolveBedrockMaxTokens({})).toBe(16000);
+  });
+
+  test("parses a valid positive integer override", () => {
+    expect(
+      resolveBedrockMaxTokens({ OPENWIKI_BEDROCK_MAX_TOKENS: "8192" }),
+    ).toBe(8192);
+    expect(
+      resolveBedrockMaxTokens({ OPENWIKI_BEDROCK_MAX_TOKENS: " 4096 " }),
+    ).toBe(4096);
+  });
+
+  test("rejects zero, negative, fractional, and non-numeric values", () => {
+    for (const value of ["0", "-1", "1.5", "abc", "", "  ", "1e3", "0x10"]) {
+      expect(() =>
+        resolveBedrockMaxTokens({ OPENWIKI_BEDROCK_MAX_TOKENS: value }),
+      ).toThrow(/OPENWIKI_BEDROCK_MAX_TOKENS/u);
+    }
+  });
+});
+
+describe("resolveConfiguredMaxOutputTokens", () => {
+  test("returns undefined when no provider-neutral limit is configured", () => {
+    expect(resolveConfiguredMaxOutputTokens("anthropic", {})).toBeUndefined();
+  });
+
+  test("parses one provider-neutral limit for any selected provider", () => {
+    const env = { OPENWIKI_MAX_OUTPUT_TOKENS: " 16384 " };
+
+    expect(resolveConfiguredMaxOutputTokens("anthropic", env)).toBe(16_384);
+    expect(resolveConfiguredMaxOutputTokens("gemini", env)).toBe(16_384);
+    expect(resolveConfiguredMaxOutputTokens("openai", env)).toBe(16_384);
+    expect(resolveConfiguredMaxOutputTokens("bedrock", env)).toBe(16_384);
+  });
+
+  test("uses the Bedrock default when no provider-neutral limit is configured", () => {
+    expect(resolveConfiguredMaxOutputTokens("bedrock", {})).toBe(
+      BEDROCK_DEFAULT_MAX_TOKENS,
+    );
+  });
+
+  test("uses the Bedrock-specific override when no provider-neutral limit is configured", () => {
+    expect(
+      resolveConfiguredMaxOutputTokens("bedrock", {
+        OPENWIKI_BEDROCK_MAX_TOKENS: "8192",
+      }),
+    ).toBe(8192);
+  });
+
+  test("prefers the provider-neutral limit over the Bedrock-specific override", () => {
+    expect(
+      resolveConfiguredMaxOutputTokens("bedrock", {
+        OPENWIKI_MAX_OUTPUT_TOKENS: "12288",
+        OPENWIKI_BEDROCK_MAX_TOKENS: "8192",
+      }),
+    ).toBe(12_288);
+  });
+
+  test("preserves the OpenRouter-specific override precedence", () => {
+    expect(
+      resolveConfiguredMaxOutputTokens("openrouter", {
+        OPENWIKI_MAX_OUTPUT_TOKENS: "16384",
+        OPENWIKI_OPENROUTER_MAX_TOKENS: "8192",
+      }),
+    ).toBe(8192);
+  });
+
+  test("rejects invalid provider-neutral limits", () => {
+    for (const value of ["0", "-1", "1.5", "abc", "", "1e3"]) {
+      expect(() =>
+        resolveConfiguredMaxOutputTokens("openai", {
+          OPENWIKI_MAX_OUTPUT_TOKENS: value,
+        }),
+      ).toThrow(/OPENWIKI_MAX_OUTPUT_TOKENS/u);
     }
   });
 });
